@@ -4,18 +4,30 @@ import AVFoundation
 struct MainWindowView: View {
     @EnvironmentObject var appModel: AppModel
     @State private var showImporter = false
-    @State private var selectedAsset: Asset?
-    @State private var section: SidebarView.Section? = .library
+    @State private var selectedAssetID: Int64?
+    @State private var section: SidebarItem? = .library
     @State private var grabStatus: String?
     @State private var playerController = PlayerController()
 
+    /// 统一按 id 取最新素材：库重载后详情不会停留在旧副本上
+    private var selectedAsset: Asset? {
+        guard let id = selectedAssetID else { return nil }
+        return appModel.assets.first { $0.id == id }
+    }
+
     var body: some View {
         NavigationSplitView {
-            SidebarView(selection: $section)
+            VStack(spacing: 0) {
+                SidebarHeaderView(roots: appModel.libraryRoots, assetCount: appModel.assets.count)
+                Divider()
+                SidebarView(selection: $section, assets: appModel.assets)
+            }
         } content: {
             mainContent
+                .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
         } detail: {
             detailContent
+                .navigationSplitViewColumnWidth(min: 320, ideal: 460)
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -41,17 +53,21 @@ struct MainWindowView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if appModel.isScanning, let p = appModel.scanProgress {
-                ScanStatusBar(progress: p)
+            VStack(spacing: 6) {
+                if appModel.isScanning, let p = appModel.scanProgress {
+                    ScanStatusBar(progress: p)
+                }
+                if let msg = grabStatus {
+                    Text(msg)
+                        .padding(10)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
             }
-            if let msg = grabStatus {
-                Text(msg)
-                    .padding(10)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.bottom, 8)
-            }
+            .padding(.bottom, 8)
         }
     }
+
+    // MARK: - 主内容区
 
     @ViewBuilder
     private var mainContent: some View {
@@ -59,58 +75,71 @@ struct MainWindowView: View {
         case .trash:
             TrashView()
         case .quickCut:
-            QuickCutPanel(seedAssets: selectedAssetsForCut)
+            QuickCutPanel()
         case .timeline:
-            TimelineView(assets: appModel.assets, selectedAsset: $selectedAsset,
-                         onRate: updateRating, onColor: updateColor)
+            TimelineView(assets: appModel.assets, selectedAssetID: $selectedAssetID,
+                         onRate: { appModel.setRating(id: $0, rating: $1) },
+                         onDelete: deleteAsset,
+                         onToggleFavorite: { appModel.toggleFavorite(id: $0) })
         case .map:
-            MapView(assets: appModel.assets, selectedAsset: $selectedAsset)
+            MapView(assets: appModel.assets, selectedAssetID: $selectedAssetID)
+        case .smartAlbum(let id):
+            if let album = SmartAlbum.find(id: id) {
+                grid(album.filter(appModel.assets), hint: "「\(album.name)」里还没有素材")
+            } else {
+                placeholder("相册不存在")
+            }
+        case .place(let name):
+            grid(appModel.assets.filter { $0.placeName == name }, hint: nil)
         default:
-            AssetGridView(assets: appModel.assets, selectedAsset: $selectedAsset,
-                          onRate: updateRating, onColor: updateColor,
-                          onDelete: deleteAsset)
+            grid(appModel.assets, hint: nil)
         }
     }
+
+    private func grid(_ assets: [Asset], hint: String?) -> some View {
+        AssetGridView(assets: assets, selectedAssetID: $selectedAssetID,
+                      onRate: { appModel.setRating(id: $0, rating: $1) },
+                      onDelete: deleteAsset,
+                      onToggleFavorite: { appModel.toggleFavorite(id: $0) },
+                      emptyHint: hint)
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        Text(text).foregroundStyle(.secondary)
+    }
+
+    // MARK: - 详情区
 
     @ViewBuilder
     private var detailContent: some View {
         if let asset = selectedAsset {
-            AssetDetailView(asset: asset, controller: playerController,
-                            onRate: updateRating, onColor: updateColor)
-                .onAppear { playerController.load(url: URL(fileURLWithPath: asset.filePath)) }
-                .onChange(of: selectedAsset?.id) { newID in
-                    if let a = appModel.assets.first(where: { $0.id == newID }) {
-                        playerController.load(url: URL(fileURLWithPath: a.filePath))
-                    }
-                }
+            AssetDetailView(
+                asset: asset,
+                controller: playerController,
+                onRate: { appModel.setRating(id: $0, rating: $1) },
+                onColor: { appModel.setColorLabel(id: $0, label: $1) },
+                onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
+                onGrab: grabFrame
+            )
+            .onAppear { load(asset) }
+            .onChange(of: asset.id) { _, _ in
+                if let a = selectedAsset { load(a) }
+            }
         } else {
             Text("选择素材查看详情")
                 .foregroundStyle(.secondary)
         }
     }
 
-    private func updateRating(_ id: Int64, _ rating: Int) {
-        try? appModel.database.updateRating(id: id, rating: rating)
-        appModel.reloadAssets()
+    private func load(_ asset: Asset) {
+        playerController.load(url: URL(fileURLWithPath: asset.filePath))
     }
 
-    /// 出片段池：有选中素材用选中的，否则取评分>=4或全部前20
-    private var selectedAssetsForCut: [Asset] {
-        if let sel = selectedAsset, let idx = appModel.assets.firstIndex(where: { $0.id == sel.id }) {
-            return Array(appModel.assets[idx...idx])
-        }
-        return Array(appModel.assets.prefix(20))
-    }
-
-    private func updateColor(_ id: Int64, _ label: Int) {
-        try? appModel.database.updateColorLabel(id: id, label: label)
-        appModel.reloadAssets()
-    }
+    // MARK: - 操作
 
     private func deleteAsset(_ id: Int64) {
-        try? appModel.database.setDeleted(id: id, deleted: true)
-        if selectedAsset?.id == id { selectedAsset = nil }
-        appModel.reloadAssets()
+        if selectedAssetID == id { selectedAssetID = nil }
+        appModel.moveToTrash(id: id)
     }
 
     private func grabFrame() {
@@ -149,4 +178,3 @@ struct ScanStatusBar: View {
         }
     }
 }
-

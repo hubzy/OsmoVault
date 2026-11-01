@@ -3,7 +3,7 @@ import MapKit
 
 struct MapView: View {
     let assets: [Asset]
-    @Binding var selectedAsset: Asset?
+    @Binding var selectedAssetID: Int64?
 
     private var geotagged: [Asset] {
         assets.filter { $0.latitude != nil && $0.longitude != nil }
@@ -33,7 +33,7 @@ struct MapView: View {
                     Annotation(pin.asset.fileName, coordinate: pin.coordinate) {
                         Image(systemName: "mappin.circle.fill")
                             .foregroundStyle(.red)
-                            .onTapGesture { selectedAsset = pin.asset }
+                            .onTapGesture { selectedAssetID = pin.asset.id }
                     }
                 }
             }

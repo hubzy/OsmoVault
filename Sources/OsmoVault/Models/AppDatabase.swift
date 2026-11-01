@@ -96,6 +96,12 @@ final class AppDatabase {
         }
     }
 
+    func setFavorite(id: Int64, favorite: Bool) throws {
+        try dbWriter.write { db in
+            try db.execute(sql: "UPDATE asset SET isFavorite = ? WHERE id = ?", arguments: [favorite, id])
+        }
+    }
+
     func setPlaceName(id: Int64, name: String) throws {
         try dbWriter.write { db in
             try db.execute(sql: "UPDATE asset SET placeName = ? WHERE id = ?", arguments: [name, id])

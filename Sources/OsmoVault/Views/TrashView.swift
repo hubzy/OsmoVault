@@ -30,9 +30,8 @@ struct TrashView: View {
         deletedAssets = (try? appModel.database.readDeletedAssets()) ?? []
     }
     private func restore(_ a: Asset) {
-        try? appModel.database.setDeleted(id: a.id ?? 0, deleted: false)
+        appModel.restore(id: a.id ?? 0)
         reload()
-        appModel.reloadAssets()
     }
 }
 

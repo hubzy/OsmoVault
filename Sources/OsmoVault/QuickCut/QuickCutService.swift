@@ -1,8 +1,9 @@
 import Foundation
 import AVFoundation
+import CoreMedia
 
 /// 一条出片片段：源素材 + 起止时间
-struct CutSegment: Identifiable, Codable {
+struct CutSegment: Identifiable, Codable, Equatable {
     var id = UUID()
     let assetID: Int64
     let sourcePath: String
@@ -32,152 +33,184 @@ struct QuickCutConfig {
     var bgmPath: String? = nil
 }
 
+enum QuickCutError: LocalizedError {
+    case empty
+    case noVideoTrack
+    case zeroLength
+    case noExportSession
+    case exportFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .empty: return "还没有任何片段"
+        case .noVideoTrack: return "选中的素材里没有可用的视频轨"
+        case .zeroLength: return "拼接后时长为零"
+        case .noExportSession: return "无法创建导出会话"
+        case .exportFailed(let msg): return "导出失败：\(msg)"
+        }
+    }
+}
+
 enum QuickCutService {
-    /// 将片段按顺序硬切拼接，导出到目标 URL（mp4）
+    private struct Source {
+        let asset: AVURLAsset
+        let videoTrack: AVAssetTrack
+        let audioTrack: AVAssetTrack?
+        let mediaRange: CMTimeRange
+    }
+
+    /// 将片段按顺序拼接，导出到目标 URL（mp4）
     static func export(segments: [CutSegment], config: QuickCutConfig, to output: URL,
                        progress: ((Double) -> Void)? = nil) async throws {
-        guard !segments.isEmpty else { throw NSError(domain: "QuickCut", code: 1, userInfo: [NSLocalizedDescriptionKey: "没有选择片段"]) }
-        var exportAudioMix: AVAudioMix?
-        let composition = AVMutableComposition()
-        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            throw NSError(domain: "QuickCut", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法创建合成轨道"])
-        }
-        let transition = CMTime(seconds: max(config.transitionDuration, 0), preferredTimescale: 600)
-        let useCrossfade = transition > .zero && segments.count > 1
-        var cursor = CMTime.zero
-        // 交叉溶解：偶数段放轨道 A，奇数段放轨道 B，重叠 transition 时长
-        var trackB: AVMutableCompositionTrack?
-        if useCrossfade {
-            trackB = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
-        }
-        for (i, seg) in segments.enumerated() {
-            let src = AVURLAsset(url: URL(fileURLWithPath: seg.sourcePath))
-            let start = CMTime(seconds: seg.start, preferredTimescale: 600)
-            var dur = CMTime(seconds: seg.duration, preferredTimescale: 600)
-            let overlap = (useCrossfade && i > 0) ? transition : .zero
-            if useCrossfade && i > 0 && i < segments.count - 1 {
-                dur = dur - transition  // 中间段两端各让出半个转场，此处简化：重叠占后段开头
-            }
-            let vTracks = src.tracks(withMediaType: .video)
-            guard let v = vTracks.first else { continue }
-            let targetTrack = (useCrossfade && i % 2 == 1) ? trackB! : videoTrack
-            let insertAt = cursor - overlap
-            try targetTrack.insertTimeRange(CMTimeRange(start: start, duration: dur), of: v, at: max(insertAt, .zero))
-            if let a = src.tracks(withMediaType: .audio).first {
-                try? audioTrack.insertTimeRange(CMTimeRange(start: start, duration: dur), of: a, at: cursor)
-            }
-            cursor = max(insertAt, .zero) + dur
-        }
-        guard cursor > .zero else { throw NSError(domain: "QuickCut", code: 3, userInfo: [NSLocalizedDescriptionKey: "拼接后时长为零"]) }
+        guard !segments.isEmpty else { throw QuickCutError.empty }
 
-        // BGM：循环铺满全片，原声保留、BGM 音量 0.3
-        if config.includeBGM, let bgmPath = config.bgmPath, FileManager.default.fileExists(atPath: bgmPath) {
-            let bgm = AVURLAsset(url: URL(fileURLWithPath: bgmPath))
-            if let bgmTrack = bgm.tracks(withMediaType: .audio).first,
-               let bgmComp = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                let totalRange = CMTimeRange(start: .zero, duration: cursor)
+        // 1. 解析源素材，并把用户填的起止时间夹到真实时长范围内
+        var sources: [Source] = []
+        for seg in segments {
+            let av = AVURLAsset(url: URL(fileURLWithPath: seg.sourcePath))
+            guard let v = av.tracks(withMediaType: .video).first else { continue }
+            let totalSeconds = CMTimeGetSeconds(av.duration)
+            let maxDur = totalSeconds.isFinite && totalSeconds > 0 ? totalSeconds : seg.end
+            let start = min(max(seg.start, 0), max(maxDur - 0.2, 0))
+            let end = min(max(seg.end, start + 0.2), maxDur)
+            let range = CMTimeRange(
+                start: CMTime(seconds: start, preferredTimescale: 600),
+                duration: CMTime(seconds: max(end - start, 0.2), preferredTimescale: 600)
+            )
+            sources.append(Source(asset: av, videoTrack: v,
+                                  audioTrack: av.tracks(withMediaType: .audio).first,
+                                  mediaRange: range))
+        }
+        guard !sources.isEmpty else { throw QuickCutError.noVideoTrack }
+
+        // 2. 编排时间轴：转场时长不能超过最短片段的 45%，否则会算出负长度的时间区间
+        var transition = CMTime(seconds: max(config.transitionDuration, 0), preferredTimescale: 600)
+        let crossfade = transition > .zero && sources.count > 1
+        if crossfade {
+            let shortest = sources.map { $0.mediaRange.duration }.min() ?? .zero
+            transition = CMTimeMinimum(transition, CMTimeMultiplyByFloat64(shortest, multiplier: 0.45))
+        } else {
+            transition = .zero
+        }
+        let useCrossfade = crossfade && transition > .zero
+
+        var positions: [CMTime] = []
+        var cursor = CMTime.zero
+        for (i, s) in sources.enumerated() {
+            if i > 0 { cursor = cursor - transition }
+            positions.append(cursor)
+            cursor = cursor + s.mediaRange.duration
+        }
+        let total = cursor
+        guard total > .zero else { throw QuickCutError.zeroLength }
+
+        // 3. 每个片段独占一条视频轨，交叉溶解时相邻片段才有重叠的余地
+        let composition = AVMutableComposition()
+        var videoTracks: [AVMutableCompositionTrack] = []
+        var audioTracks: [AVMutableCompositionTrack] = []
+
+        for (i, s) in sources.enumerated() {
+            guard let vt = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                throw QuickCutError.noExportSession
+            }
+            vt.preferredTransform = s.videoTrack.preferredTransform
+            try vt.insertTimeRange(s.mediaRange, of: s.videoTrack, at: positions[i])
+            videoTracks.append(vt)
+
+            if let a = s.audioTrack,
+               let at = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                try? at.insertTimeRange(s.mediaRange, of: a, at: positions[i])
+                audioTracks.append(at)
+            }
+        }
+
+        // 4. 画幅：强制比例用目标尺寸，否则用第一段素材的实际尺寸
+        let renderSize = config.aspect.size ?? orientedSize(of: sources[0].videoTrack)
+        let fps = max(sources.map { $0.videoTrack.nominalFrameRate }.max() ?? 30, 24)
+
+        let vc = AVMutableVideoComposition()
+        vc.renderSize = renderSize
+        vc.frameDuration = CMTime(value: 1, timescale: Int32(max(fps.rounded(), 24)))
+        vc.renderScale = 1.0
+
+        let layerInstructions: [AVMutableVideoCompositionLayerInstruction] = sources.indices.map { i in
+            let li = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTracks[i])
+            li.setTransform(fitTransform(track: sources[i].videoTrack, renderSize: renderSize), at: .zero)
+            li.setOpacity(1.0, at: .zero)
+            return li
+        }
+
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+        for i in sources.indices {
+            let p = positions[i]
+            let d = sources[i].mediaRange.duration
+            // 该片段独占的区间（不含前后转场）
+            let soloStart = i == 0 ? CMTime.zero : p + transition
+            let soloEnd = i == sources.count - 1 ? p + d : p + d - transition
+            if soloEnd > soloStart {
+                let instr = AVMutableVideoCompositionInstruction()
+                instr.timeRange = CMTimeRange(start: soloStart, duration: soloEnd - soloStart)
+                instr.layerInstructions = [layerInstructions[i]]
+                instructions.append(instr)
+            }
+            // 与下一段之间的交叉溶解窗口
+            if useCrossfade, i + 1 < sources.count {
+                let window = CMTimeRange(start: positions[i + 1], duration: transition)
+                // 前段淡出 + 后段淡入：两条都做斜坡，无论图层顺序如何都能看出转场
+                layerInstructions[i].setOpacityRamp(fromStartOpacity: 1.0, toEndOpacity: 0.0, timeRange: window)
+                layerInstructions[i + 1].setOpacityRamp(fromStartOpacity: 0.0, toEndOpacity: 1.0, timeRange: window)
+                let instr = AVMutableVideoCompositionInstruction()
+                instr.timeRange = window
+                instr.layerInstructions = [layerInstructions[i], layerInstructions[i + 1]]
+                instructions.append(instr)
+            }
+        }
+        vc.instructions = instructions
+
+        // 5. BGM：循环铺满全片，原声保留、BGM 音量 0.3
+        var exportAudioMix: AVAudioMix?
+        if config.includeBGM, let bgmPath = config.bgmPath, FileManager.default.fileExists(atPath: bgmPath),
+           let bgmTrack = AVURLAsset(url: URL(fileURLWithPath: bgmPath)).tracks(withMediaType: .audio).first,
+           let bgmComp = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            let bgmSeconds = CMTimeGetSeconds(bgmTrack.asset?.duration ?? .zero)
+            if bgmSeconds.isFinite && bgmSeconds > 0.5 {
                 var t = CMTime.zero
-                while t < cursor {
-                    let remaining = cursor - t
-                    let dur = min(bgm.duration, remaining)
-                    try? bgmComp.insertTimeRange(CMTimeRange(start: .zero, duration: dur), of: bgmTrack, at: t)
-                    t = t + dur
+                while t < total {
+                    let piece = min(CMTime(seconds: bgmSeconds, preferredTimescale: 600), total - t)
+                    if piece <= .zero { break }
+                    try? bgmComp.insertTimeRange(CMTimeRange(start: .zero, duration: piece), of: bgmTrack, at: t)
+                    t = t + piece
                 }
-                _ = totalRange
                 let mix = AVMutableAudioMix()
-                let mainParams = AVMutableAudioMixInputParameters(track: audioTrack)
                 let bgmParams = AVMutableAudioMixInputParameters(track: bgmComp)
                 bgmParams.setVolume(0.3, at: .zero)
-                mix.inputParameters = [mainParams, bgmParams]
+                mix.inputParameters = audioTracks.map { AVMutableAudioMixInputParameters(track: $0) } + [bgmParams]
                 exportAudioMix = mix
             }
         }
 
+        // 6. 导出
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-            throw NSError(domain: "QuickCut", code: 4)
+            throw QuickCutError.noExportSession
         }
-        export.audioMix = exportAudioMix
-
-        // 视频合成：交叉溶解 opacity 动画 + 输出比例
-        if useCrossfade, let tb = trackB {
-            let vc = AVMutableVideoComposition()
-            let natural = composition.naturalSize
-            let outSize: CGSize
-            if let forced = config.aspect.size {
-                // 保持高度按目标比例，宽度取源（等比 letterbox 由 preset 处理；简化取目标尺寸）
-                outSize = forced
-            } else {
-                outSize = CGSize(width: abs(natural.width), height: abs(natural.height))
-            }
-            vc.renderSize = outSize
-            var instructions: [AVMutableVideoCompositionInstruction] = []
-            let aParams = AVMutableVideoCompositionLayerInstruction(trackID: videoTrack.trackID)
-            let bParams = AVMutableVideoCompositionLayerInstruction(trackID: tb.trackID)
-            // 简化方案：A 轨整体 opacity 1；B 轨在各转场窗口内 0→1 渐入。
-            // 生成转场时间点列表
-            var t = CMTime.zero
-            var windows: [CMTimeRange] = []
-            for (i, seg) in segments.enumerated() where i > 0 {
-                _ = seg
-                let src = AVURLAsset(url: URL(fileURLWithPath: segments[i].sourcePath))
-                _ = src
-                t = CMTime.zero
-            }
-            // 重建时间线：与插入逻辑一致
-            var c = CMTime.zero
-            for (i, seg) in segments.enumerated() {
-                let dur = CMTime(seconds: seg.duration, preferredTimescale: 600)
-                let overlap = (i > 0) ? transition : .zero
-                let ins = max(c - overlap, .zero)
-                if i > 0 {
-                    windows.append(CMTimeRange(start: ins, duration: transition))
-                }
-                c = ins + dur - ((i > 0 && i < segments.count - 1) ? transition : .zero)
-            }
-            var fullOpacity = AVMutableVideoCompositionLayerInstruction(trackID: videoTrack.trackID)
-            _ = fullOpacity
-            fullOpacity = aParams
-            for w in windows {
-                bParams.setOpacity(0.0, at: w.start)
-                bParams.setOpacity(1.0, at: CMTimeRangeGetEnd(w))
-            }
-            let instr = AVMutableVideoCompositionInstruction()
-            instr.timeRange = CMTimeRange(start: .zero, duration: cursor)
-            instr.layerInstructions = [fullOpacity, bParams]
-            instructions.append(instr)
-            vc.instructions = instructions
-            vc.frameDuration = CMTime(value: 1, timescale: 30)
-            export.videoComposition = vc
-        } else if let forced = config.aspect.size {
-            let vc = AVMutableVideoComposition()
-            vc.renderSize = forced
-            vc.frameDuration = CMTime(value: 1, timescale: 30)
-            let natural = composition.naturalSize
-            if let track = composition.tracks(withMediaType: .video).first {
-                let instr = AVMutableVideoCompositionInstruction()
-                instr.timeRange = CMTimeRange(start: .zero, duration: cursor)
-                let li = AVMutableVideoCompositionLayerInstruction(trackID: track.trackID)
-                let scale = min(forced.width / abs(natural.width), forced.height / abs(natural.height))
-                li.setTransform(CGAffineTransform(scaleX: scale, y: scale),
-                                at: .zero)
-                instr.layerInstructions = [li]
-                vc.instructions = [instr]
-            }
-            export.videoComposition = vc
-        }
-
         export.outputURL = output
         export.outputFileType = .mp4
+        export.videoComposition = vc
+        export.audioMix = exportAudioMix
         export.shouldOptimizeForNetworkUse = true
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { _ in
+        export.canPerformMultiplePassesOverSourceMediaData = true
+
+        try? FileManager.default.removeItem(at: output)
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
             progress?(Double(export.progress))
         }
-        try? FileManager.default.removeItem(at: output)
         await export.export()
         timer.invalidate()
         progress?(1.0)
-        if let e = export.error { throw e }
+
+        if export.status == .failed || export.status == .cancelled {
+            throw QuickCutError.exportFailed(export.error?.localizedDescription ?? "未知错误")
+        }
     }
 
     static func defaultOutputURL() -> URL {
@@ -187,5 +220,28 @@ enum QuickCutService {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyyMMdd-HHmmss"
         return dir.appendingPathComponent("cut_\(fmt.string(from: Date())).mp4")
     }
-}
 
+    // MARK: - 几何
+
+    private static func orientedSize(of track: AVAssetTrack) -> CGSize {
+        let s = track.naturalSize.applying(track.preferredTransform)
+        return CGSize(width: max(abs(s.width), 16), height: max(abs(s.height), 16))
+    }
+
+    /// 把源画面转正后等比铺满目标画幅，多余部分裁掉（cover）
+    private static func fitTransform(track: AVAssetTrack, renderSize: CGSize) -> CGAffineTransform {
+        let oriented = track.naturalSize.applying(track.preferredTransform)
+        let w = max(abs(oriented.width), 1)
+        let h = max(abs(oriented.height), 1)
+        let scale = max(renderSize.width / w, renderSize.height / h)
+        let tx = (renderSize.width - w * scale) / 2
+        let ty = (renderSize.height - h * scale) / 2
+
+        var t = track.preferredTransform
+        // 旋转后画面原点可能落在负坐标，先移回原点
+        t = t.concatenating(CGAffineTransform(translationX: -min(oriented.width, 0), y: -min(oriented.height, 0)))
+        t = t.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        t = t.concatenating(CGAffineTransform(translationX: tx, y: ty))
+        return t
+    }
+}

@@ -108,6 +108,16 @@ final class AppDatabase {
         }
     }
 
+    /// 彻底删除索引记录（不动磁盘文件）。用于移除误导入的重复来源
+    func delete(ids: [Int64]) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            try db.execute(sql: "DELETE FROM asset WHERE id IN (\(marks))",
+                           arguments: StatementArguments(ids))
+        }
+    }
+
     func hasAny(filePath: String, fingerprint: String) throws -> Bool {
         try dbReader.read { db in
             let byPath = try Row.fetchOne(db, sql: "SELECT 1 FROM asset WHERE filePath = ?", arguments: [filePath]) != nil

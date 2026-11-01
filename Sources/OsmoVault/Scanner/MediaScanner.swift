@@ -7,9 +7,12 @@ struct MediaScanner {
 
     func scan(folder: URL) -> AsyncStream<ScanProgress> {
         AsyncStream { continuation in
-            let task = Task {
+            // 必须 detached：用 Task 会继承调用方的 MainActor，整个扫描（读几百个 4K 文件的
+            // 时长/分辨率）会堵住主线程，进度条一帧都渲染不出来，看着就像"什么都没发生"
+            let task = Task.detached(priority: .utility) {
                 var newCount = 0
                 var dupCount = 0
+                var newIDs: [Int64] = []     // 本次真正新增的 id，供"只看本次导入"使用
                 continuation.yield(ScanProgress(state: .discovering, currentFile: nil))
 
                 let videoURLs = Self.discoverVideoFiles(in: folder)
@@ -25,10 +28,11 @@ struct MediaScanner {
                         var asset = Self.buildAsset(url: url, fingerprint: fp, srtPath: DJINamingRule.srtSibling(for: url))
                         try? database.save(&asset)
                         newCount += 1
+                        if let id = asset.id { newIDs.append(id) }
                     }
                     continuation.yield(ScanProgress(state: .importing(indexed: index + 1, total: total), currentFile: url.lastPathComponent))
                 }
-                continuation.yield(ScanProgress(state: .finished(newAssets: newCount, duplicates: dupCount), currentFile: nil))
+                continuation.yield(ScanProgress(state: .finished(newAssets: newCount, duplicates: dupCount, newIDs: newIDs), currentFile: nil))
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }

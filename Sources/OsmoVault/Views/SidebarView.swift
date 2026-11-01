@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 enum SidebarItem: Hashable {
     case library
@@ -6,13 +7,22 @@ enum SidebarItem: Hashable {
     case map
     case quickCut
     case trash
+    case duplicates
     case smartAlbum(String)
     case place(String)
+    case source(String)   // 某个来源文件夹下的素材
 }
 
 struct SidebarView: View {
     @Binding var selection: SidebarItem?
     let assets: [Asset]
+    /// 所有导入过的文件夹及其素材数。不传则不显示「导入来源」分组
+    var sources: [(path: String, count: Int)] = []
+    /// 某个来源最近一次导入的时间，用于提示
+    var lastImportedAt: ((String) -> Date?)?
+    /// 右键来源 → 从库中移除
+    var onRemoveSource: ((String) -> Void)?
+    var duplicateCount: Int = 0
 
     /// 只在素材或选中变化时才重算，避免 hover 之类的操作触发整条侧边栏重排
     private var albums: [(album: SmartAlbum, count: Int)] {
@@ -33,6 +43,26 @@ struct SidebarView: View {
                     .tag(SidebarItem.timeline)
                 row(icon: "map", title: "地图")
                     .tag(SidebarItem.map)
+            }
+
+            if !sources.isEmpty {
+                Section("导入来源") {
+                    ForEach(sources, id: \.path) { item in
+                        row(icon: "folder", title: folderName(item.path), count: item.count)
+                            .opacity(item.count == 0 ? 0.45 : 1)
+                            .help(sourceHelp(item))
+                            .tag(SidebarItem.source(item.path))
+                            .contextMenu {
+                                Button("在访达中显示") {
+                                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: item.path)
+                                }
+                                Divider()
+                                Button("从库中移除（不删原文件）", role: .destructive) {
+                                    onRemoveSource?(item.path)
+                                }
+                            }
+                    }
+                }
             }
 
             Section("智能相册") {
@@ -56,6 +86,10 @@ struct SidebarView: View {
             Section("工具") {
                 row(icon: "scissors", title: "一键出片")
                     .tag(SidebarItem.quickCut)
+                // 同一段视频被从两个路径导入后没法区分，这里集中处理
+                row(icon: "doc.on.doc", title: "重复素材", count: duplicateCount)
+                    .opacity(duplicateCount == 0 ? 0.45 : 1)
+                    .tag(SidebarItem.duplicates)
                 row(icon: "trash", title: "回收站")
                     .tag(SidebarItem.trash)
             }
@@ -63,6 +97,18 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("OsmoVault")
         .frame(minWidth: 190)
+    }
+
+    private func folderName(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private func sourceHelp(_ item: (path: String, count: Int)) -> String {
+        var lines = [item.path, "\(item.count) 个素材"]
+        if let at = lastImportedAt?(item.path) {
+            lines.append("最近导入 \(at.formatted(date: .numeric, time: .shortened))")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func row(icon: String, title: String, count: Int? = nil) -> some View {

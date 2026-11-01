@@ -478,65 +478,36 @@ private struct ShortcutModifier: ViewModifier {
 
 // MARK: - 库位置条
 
-/// 显示当前库来自哪个文件夹。放在右侧面板顶部常驻，未选中素材时也能看到
+/// 显示当前素材来自哪个文件夹。路径由外部给定（跟随选中素材 / 最近导入），
+/// 不带筛选、不带下拉，只保留"在访达中打开"
 struct LibraryPathBar: View {
-    /// 最近导入的在前；为空表示还没导入过
-    let roots: [String]
+    /// nil 表示还没导入过
+    let path: String?
+    /// 该文件夹下的素材数
     let assetCount: Int
-
-    @State private var rootIndex = 0
-
-    private var currentPath: String? {
-        guard !roots.isEmpty else { return nil }
-        return roots[min(rootIndex, roots.count - 1)]
-    }
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "externaldrive.fill")
                 .foregroundStyle(.secondary)
-                .help("当前库来源")
+                .help("素材所在位置")
 
-            if let path = currentPath {
+            if let path {
+                Text(abbreviate(path))
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(path)
+
                 Button {
                     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
                 } label: {
-                    HStack(spacing: 4) {
-                        Text(abbreviate(path))
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "arrow.up.forward.circle")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
+                    Image(systemName: "arrow.up.forward.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help("\(path)\n点击在访达中打开")
-
-                // 导入过多个文件夹时可以切换显示哪一个
-                if roots.count > 1 {
-                    Menu {
-                        ForEach(Array(roots.enumerated()), id: \.offset) { index, root in
-                            Button {
-                                rootIndex = index
-                            } label: {
-                                if index == min(rootIndex, roots.count - 1) {
-                                    Image(systemName: "checkmark")
-                                }
-                                Text(abbreviate(root))
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 16)
-                    .help("共 \(roots.count) 个来源文件夹")
-                }
+                .buttonStyle(.borderless)
+                .help("在访达中打开该文件夹")
             } else {
                 Text("尚未导入文件夹")
                     .font(.caption)
@@ -552,10 +523,6 @@ struct LibraryPathBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
-        // 来源数量变化后索引可能越界，自动归位
-        .onChange(of: roots.count) { _, count in
-            if rootIndex > count - 1 { rootIndex = 0 }
-        }
     }
 
     /// 家目录缩写为 ~，长路径靠 truncationMode(.middle) 省略

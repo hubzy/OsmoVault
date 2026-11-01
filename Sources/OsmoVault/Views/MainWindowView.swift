@@ -8,6 +8,14 @@ struct MainWindowView: View {
     @State private var section: SidebarItem? = .library
     @State private var grabStatus: String?
     @State private var playerController = PlayerController()
+    /// 侧边栏右键来源后待确认移除的文件夹
+    @State private var sourceToRemove: String?
+
+    private var removeMessage: String {
+        guard let path = sourceToRemove else { return "" }
+        let n = appModel.assets.filter { $0.filePath.hasPrefix(path) }.count
+        return "将移除 \(path) 下的 \(n) 条索引记录，磁盘上的视频文件不会改动。"
+    }
 
     /// 统一按 id 取最新素材：库重载后详情不会停留在旧副本上
     private var selectedAsset: Asset? {
@@ -15,9 +23,27 @@ struct MainWindowView: View {
         return appModel.assets.first { $0.id == id }
     }
 
+    /// 顶部路径条跟随当前素材：选中素材时显示它所在目录，否则显示最近导入的文件夹
+    private var libraryPath: String? {
+        if let asset = selectedAsset {
+            return (asset.filePath as NSString).deletingLastPathComponent
+        }
+        return appModel.libraryRoots.first
+    }
+
+    private var libraryPathCount: Int {
+        guard let path = libraryPath else { return appModel.assets.count }
+        let n = appModel.assets.filter { $0.filePath.hasPrefix(path) }.count
+        return n > 0 ? n : appModel.assets.count
+    }
+
     var body: some View {
         NavigationSplitView {
-            SidebarView(selection: $section, assets: appModel.assets)
+            SidebarView(selection: $section, assets: appModel.assets,
+                        sources: appModel.sourceItems,
+                        lastImportedAt: { appModel.lastImportedAt($0) },
+                        onRemoveSource: { sourceToRemove = $0 },
+                        duplicateCount: appModel.duplicateGroups().count)
         } content: {
             mainContent
                 .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
@@ -40,10 +66,34 @@ struct MainWindowView: View {
                 appModel.scanFolder(folder)
             }
         }
+        .alert("从库中移除", isPresented: Binding(
+            get: { sourceToRemove != nil },
+            set: { if !$0 { sourceToRemove = nil } }
+        )) {
+            Button("移除", role: .destructive) {
+                if let path = sourceToRemove {
+                    appModel.removeSource(path)
+                    if case .source(let p) = section, p == path { section = .library }
+                }
+                sourceToRemove = nil
+            }
+            Button("取消", role: .cancel) { sourceToRemove = nil }
+        } message: {
+            Text(removeMessage)
+        }
         .overlay(alignment: .bottom) {
             VStack(spacing: 6) {
-                if appModel.isScanning, let p = appModel.scanProgress {
-                    ScanStatusBar(progress: p)
+                // 注意用 scanProgress 而不是 isScanning 判断：完成后 isScanning 已经置 false，
+                // 用它会让"完成：新增 N"这条结果一闪而过，等于没有提示
+                if let p = appModel.scanProgress {
+                    ScanStatusBar(progress: p,
+                                  folderName: appModel.lastImport.map {
+                                      URL(fileURLWithPath: $0.path).lastPathComponent
+                                  },
+                                  onShowFolder: {
+                                      if let path = appModel.lastImport?.path { section = .source(path) }
+                                  },
+                                  onDismiss: { appModel.dismissScanStatus() })
                 }
                 if let msg = grabStatus {
                     Text(msg)
@@ -69,6 +119,8 @@ struct MainWindowView: View {
                          onRate: { appModel.setRating(id: $0, rating: $1) },
                          onDelete: deleteAsset,
                          onToggleFavorite: { appModel.toggleFavorite(id: $0) })
+        case .duplicates:
+            DuplicateView()
         case .map:
             MapView(assets: appModel.assets, selectedAssetID: $selectedAssetID)
         case .smartAlbum(let id):
@@ -79,6 +131,9 @@ struct MainWindowView: View {
             }
         case .place(let name):
             grid(appModel.assets.filter { $0.placeName == name }, hint: nil)
+        case .source(let path):
+            grid(appModel.assets.filter { $0.filePath.hasPrefix(path) },
+                 hint: "「\(path)」下没有素材")
         default:
             grid(appModel.assets, hint: nil)
         }
@@ -102,7 +157,7 @@ struct MainWindowView: View {
     private var detailContent: some View {
         VStack(spacing: 0) {
             // 库位置条常驻：一眼能看到当前导入的是哪个文件夹
-            LibraryPathBar(roots: appModel.libraryRoots, assetCount: appModel.assets.count)
+            LibraryPathBar(path: libraryPath, assetCount: libraryPathCount)
             Divider()
 
             if let asset = selectedAsset {
@@ -158,10 +213,17 @@ struct MainWindowView: View {
 
 struct ScanStatusBar: View {
     let progress: ScanProgress
+    /// 导入的文件夹名，结果里带上，多个来源时才知道这次是哪一份
+    var folderName: String?
+    /// 跳到刚导入的那个文件夹（侧边栏「导入来源」里能对应上）
+    var onShowFolder: () -> Void
+    var onDismiss: () -> Void
+
     var body: some View {
         switch progress.state {
         case .discovering:
-            Label("正在发现文件…", systemImage: "magnifyingglass").padding(8).background(.bar, in: RoundedRectangle(cornerRadius: 8))
+            Label("正在发现文件…", systemImage: "magnifyingglass")
+                .padding(8).background(.bar, in: RoundedRectangle(cornerRadius: 8))
         case .importing(let indexed, let total):
             HStack {
                 if let total {
@@ -170,9 +232,37 @@ struct ScanStatusBar: View {
                     ProgressView()
                 }
                 Text(progress.currentFile ?? "").lineLimit(1).font(.caption).foregroundStyle(.secondary)
-            }.padding(8).frame(maxWidth: 420).background(.bar, in: RoundedRectangle(cornerRadius: 8))
-        case .finished(let newAssets, let duplicates):
-            Label("完成：新增 \(newAssets)，跳过重复 \(duplicates)", systemImage: "checkmark.circle").padding(8).background(.bar, in: RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(8).frame(maxWidth: 420).background(.bar, in: RoundedRectangle(cornerRadius: 8))
+        case .finished(let newAssets, let duplicates, _):
+            HStack(spacing: 10) {
+                Image(systemName: newAssets > 0 ? "checkmark.circle.fill" : "checkmark.circle")
+                    .foregroundStyle(newAssets > 0 ? .green : .secondary)
+                Text(summary(newAssets: newAssets, duplicates: duplicates))
+                if newAssets > 0 {
+                    Divider().frame(height: 14)
+                    Button("只看该文件夹") { onShowFolder() }
+                        .buttonStyle(.borderless)
+                }
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("关闭")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(.bar, in: RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    private func summary(newAssets: Int, duplicates: Int) -> String {
+        let prefix = folderName.map { "「\($0)」" } ?? "导入完成"
+        if newAssets > 0 {
+            return "\(prefix) 导入完成：新增 \(newAssets) 个，跳过重复 \(duplicates) 个"
+        }
+        return "\(prefix) 导入完成：没有新素材，\(duplicates) 个已存在"
     }
 }

@@ -114,37 +114,36 @@ struct MainWindowView: View {
             TrashView()
         case .quickCut:
             QuickCutPanel()
-        case .timeline:
-            TimelineView(assets: appModel.assets, selectedAssetID: $selectedAssetID,
-                         onRate: { appModel.setRating(id: $0, rating: $1) },
-                         onDelete: deleteAsset,
-                         onToggleFavorite: { appModel.toggleFavorite(id: $0) })
         case .duplicates:
             DuplicateView()
         case .map:
             MapView(assets: appModel.assets, selectedAssetID: $selectedAssetID)
         case .smartAlbum(let id):
             if let album = SmartAlbum.find(id: id) {
-                grid(album.filter(appModel.assets), hint: "「\(album.name)」里还没有素材")
+                library(album.filter(appModel.assets),
+                        title: album.name,
+                        hint: "「\(album.name)」里还没有素材")
             } else {
                 placeholder("相册不存在")
             }
         case .place(let name):
-            grid(appModel.assets.filter { $0.placeName == name }, hint: nil)
+            library(appModel.assets.filter { $0.placeName == name }, title: name)
         case .source(let path):
-            grid(appModel.assets.filter { $0.filePath.hasPrefix(path) },
-                 hint: "「\(path)」下没有素材")
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            library(appModel.assets.filter { $0.filePath.hasPrefix(path) },
+                    title: name, hint: "「\(name)」下没有素材")
         default:
-            grid(appModel.assets, hint: nil)
+            library(appModel.assets)
         }
     }
 
-    private func grid(_ assets: [Asset], hint: String?) -> some View {
-        AssetGridView(assets: assets, selectedAssetID: $selectedAssetID,
-                      onRate: { appModel.setRating(id: $0, rating: $1) },
-                      onDelete: deleteAsset,
-                      onToggleFavorite: { appModel.toggleFavorite(id: $0) },
-                      emptyHint: hint)
+    /// 图库页：网格与时间轴合并在一起，顶部统一显示总数
+    private func library(_ assets: [Asset], title: String = "图库", hint: String? = nil) -> some View {
+        LibraryView(title: title, assets: assets, selectedAssetID: $selectedAssetID,
+                    onRate: { appModel.setRating(id: $0, rating: $1) },
+                    onDelete: deleteAsset,
+                    onToggleFavorite: { appModel.toggleFavorite(id: $0) },
+                    emptyHint: hint)
     }
 
     private func placeholder(_ text: String) -> some View {

@@ -3,7 +3,6 @@ import AppKit
 
 enum SidebarItem: Hashable {
     case library
-    case timeline
     case map
     case quickCut
     case trash
@@ -37,10 +36,9 @@ struct SidebarView: View {
     var body: some View {
         List(selection: $selection) {
             Section("图库") {
-                row(icon: "square.grid.2x2", title: "资料库", count: assets.count)
+                // 资料库与时间轴已合并成一页，网格/时间轴切换在页面顶部
+                row(icon: "square.grid.2x2", title: "图库", count: assets.count)
                     .tag(SidebarItem.library)
-                row(icon: "clock", title: "时间轴")
-                    .tag(SidebarItem.timeline)
                 row(icon: "map", title: "地图")
                     .tag(SidebarItem.map)
             }

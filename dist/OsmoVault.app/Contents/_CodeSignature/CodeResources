@@ -11,6 +11,15 @@
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>MacOS/OsmoVault.cstemp</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			fQnQ4dIi948I8pFMqf9El2mwsL0=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"7d09d0e1d222f78f08f2914ca9ff449769b0b0bd"</string>
+		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
 			<key>hash2</key>

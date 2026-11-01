@@ -1,77 +1,50 @@
 import SwiftUI
 
-/// 一天一组的素材
-private struct TimelineDay: Identifiable {
-    let id: String          // "2026-05-12"
-    let title: String       // "5月12日 星期一"
-    let items: [Asset]
-    var seconds: Double { items.reduce(0) { $0 + $1.durationSeconds } }
-}
-
-/// 一个月的分区，含刻度尺标签与统计
-private struct TimelineMonth: Identifiable {
-    let id: String          // "2026-05"
-    let title: String       // "2026年5月"
-    let year: Int           // 刻度尺上插入年份标记用
-    let month: Int          // 刻度尺标签："5月"
-    let days: [TimelineDay]
-    let count: Int
-    let seconds: Double
-}
-
-struct TimelineView: View {
+/// 图库页：按拍摄时间分组的时间轴，顶部统一显示总量统计。
+/// 智能相册 / 拍摄地 / 导入来源等筛选结果也复用这一页，标题与数量随之变化。
+struct LibraryView: View {
+    var title: String = "图库"
     let assets: [Asset]
     @Binding var selectedAssetID: Int64?
     var onRate: (Int64, Int) -> Void = { _, _ in }
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
-
-    /// 默认按时间正序：2026年 → 1月 → 2月 → 3月 往后排
-    @State private var newestFirst = false
+    var emptyHint: String?
 
     var body: some View {
-        // 分组只算一次再往下传：放在子视图里各自调用会重复计算好几遍
-        let months = buildSections(newestFirst: newestFirst)
-        let noDate = assets.filter { $0.recordedAt == nil }
-        let total = assets.reduce(0) { $0 + $1.durationSeconds }
-        let span = spanText
-
-        return VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("时间轴").font(.title2).bold()
-                    Text("\(assets.count) 个素材 · \(span) · 总时长 \(Self.humanDuration(total))")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Picker("排序", selection: $newestFirst) {
-                    Text("最早在前").tag(false)
-                    Text("最新在前").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-
+        VStack(spacing: 0) {
+            header
             Divider()
-
-            if months.isEmpty && noDate.isEmpty {
-                VStack(spacing: 10) {
-                    Spacer()
-                    Image(systemName: "clock").font(.largeTitle).foregroundStyle(.secondary)
-                    Text("还没有带拍摄时间的素材").font(.title3)
-                    Text("导入后会在时间轴上按拍摄日期自动排布").font(.subheadline).foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            } else {
-                TimelineScroller(months: months, undated: noDate,
-                                 selectedAssetID: $selectedAssetID,
-                                 onRate: onRate, onDelete: onDelete,
-                                 onToggleFavorite: onToggleFavorite)
-            }
+            content
         }
+    }
+
+    // MARK: - 顶部：标题 + 总量统计 + 视图切换
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.title2).bold()
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(summary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    /// 数量 + 时间跨度 + 总时长，一行说清楚当前集合有多大
+    private var summary: String {
+        let seconds = assets.reduce(0) { $0 + $1.durationSeconds }
+        var parts = ["\(assets.count) 个素材"]
+        let span = spanText
+        if span != "暂无时间信息" { parts.append(span) }
+        parts.append("总时长 \(Self.humanDuration(seconds))")
+        return parts.joined(separator: " · ")
     }
 
     private var spanText: String {
@@ -82,7 +55,51 @@ struct TimelineView: View {
         return a == b ? a : "\(a) – \(b)"
     }
 
-    private func buildSections(newestFirst: Bool) -> [TimelineMonth] {
+    // MARK: - 内容区
+
+    @ViewBuilder
+    private var content: some View {
+        if assets.isEmpty {
+            VStack(spacing: 10) {
+                Spacer()
+                Image(systemName: "film.stack").font(.largeTitle).foregroundStyle(.secondary)
+                Text(emptyHint ?? "还没有素材").font(.title3)
+                if emptyHint == nil {
+                    Text("点击右上角导入文件夹开始建库").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            timelineContent
+        }
+    }
+
+    @ViewBuilder
+    private var timelineContent: some View {
+        // 分组只算一次再往下传：放在子视图里各自调用会重复计算好几遍
+        let months = buildSections()
+        let noDate = assets.filter { $0.recordedAt == nil }
+
+        if months.isEmpty && noDate.isEmpty {
+            VStack(spacing: 10) {
+                Spacer()
+                Image(systemName: "clock").font(.largeTitle).foregroundStyle(.secondary)
+                Text("还没有带拍摄时间的素材").font(.title3)
+                Text("导入后会在时间轴上按拍摄日期自动排布").font(.subheadline).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            TimelineScroller(months: months, undated: noDate,
+                             selectedAssetID: $selectedAssetID,
+                             onRate: onRate, onDelete: onDelete,
+                             onToggleFavorite: onToggleFavorite)
+        }
+    }
+
+    /// 固定时间正序：2026年 → 1月 → 2月 往后排
+    private func buildSections() -> [TimelineMonth] {
         let cal = Calendar.current
         let dated = assets.compactMap { asset -> (Asset, Date)? in
             guard let t = asset.recordedAt else { return nil }
@@ -102,7 +119,7 @@ struct TimelineView: View {
                     .sorted { ($0.recordedAt ?? .distantPast) < ($1.recordedAt ?? .distantPast) }
                 return TimelineDay(id: dayKey, title: Self.dayTitle.string(from: dayPairs[0].1), items: items)
             }
-            .sorted { newestFirst ? $0.id > $1.id : $0.id < $1.id }
+            .sorted { $0.id < $1.id }
 
             result.append(TimelineMonth(
                 id: key,
@@ -115,7 +132,7 @@ struct TimelineView: View {
             ))
         }
 
-        result.sort { newestFirst ? $0.id > $1.id : $0.id < $1.id }
+        result.sort { $0.id < $1.id }
         return result
     }
 
@@ -145,6 +162,27 @@ struct TimelineView: View {
         if m > 0 { return "\(m) 分 \(sec) 秒" }
         return "\(sec) 秒"
     }
+}
+
+// MARK: - 时间轴的分组模型
+
+/// 一天一组的素材
+private struct TimelineDay: Identifiable {
+    let id: String          // "2026-05-12"
+    let title: String       // "5月12日 星期一"
+    let items: [Asset]
+    var seconds: Double { items.reduce(0) { $0 + $1.durationSeconds } }
+}
+
+/// 一个月的分区，含刻度尺标签与统计
+private struct TimelineMonth: Identifiable {
+    let id: String          // "2026-05"
+    let title: String       // "2026年5月"
+    let year: Int           // 刻度尺上插入年份标记用
+    let month: Int          // 刻度尺标签："5月"
+    let days: [TimelineDay]
+    let count: Int
+    let seconds: Double
 }
 
 /// 刻度尺 + 可滚动的分组列表。months 由外层算好传进来，这里不再重复计算
@@ -179,7 +217,7 @@ private struct TimelineScroller: View {
                                     VStack(alignment: .leading, spacing: 8) {
                                         HStack(spacing: 6) {
                                             Text(day.title).font(.subheadline).bold()
-                                            Text("\(day.items.count) 个 · \(TimelineView.humanDuration(day.seconds))")
+                                            Text("\(day.items.count) 个 · \(LibraryView.humanDuration(day.seconds))")
                                                 .font(.caption2).foregroundStyle(.secondary)
                                             Spacer()
                                         }
@@ -192,7 +230,7 @@ private struct TimelineScroller: View {
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     Text(month.title).font(.title3).bold()
                                     Text("\(month.count) 个素材").font(.caption).foregroundStyle(.secondary)
-                                    Text("时长 \(TimelineView.humanDuration(month.seconds))")
+                                    Text("时长 \(LibraryView.humanDuration(month.seconds))")
                                         .font(.caption).foregroundStyle(.secondary)
                                     Spacer()
                                 }

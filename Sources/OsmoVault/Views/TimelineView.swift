@@ -12,7 +12,8 @@ private struct TimelineDay: Identifiable {
 private struct TimelineMonth: Identifiable {
     let id: String          // "2026-05"
     let title: String       // "2026年5月"
-    let rulerLabel: String  // 刻度尺短标签：该年首月标年份，其余标月份
+    let year: Int           // 刻度尺上插入年份标记用
+    let month: Int          // 刻度尺标签："5月"
     let days: [TimelineDay]
     let count: Int
     let seconds: Double
@@ -25,7 +26,8 @@ struct TimelineView: View {
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
 
-    @State private var newestFirst = true
+    /// 默认按时间正序：2026年 → 1月 → 2月 → 3月 往后排
+    @State private var newestFirst = false
 
     var body: some View {
         // 分组只算一次再往下传：放在子视图里各自调用会重复计算好几遍
@@ -43,8 +45,8 @@ struct TimelineView: View {
                 }
                 Spacer()
                 Picker("排序", selection: $newestFirst) {
-                    Text("最新在前").tag(true)
                     Text("最早在前").tag(false)
+                    Text("最新在前").tag(true)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 190)
@@ -102,14 +104,11 @@ struct TimelineView: View {
             }
             .sorted { newestFirst ? $0.id > $1.id : $0.id < $1.id }
 
-            let year = cal.component(.year, from: sample)
-            let monthNum = cal.component(.month, from: sample)
-            // 该年第一个月标年份，其余只标月份，避免刻度尺标签挤成一团
-            let isFirstOfYear = !byMonth.keys.contains { $0.hasPrefix("\(year)-") && $0 < key }
             result.append(TimelineMonth(
                 id: key,
                 title: Self.monthTitle.string(from: sample),
-                rulerLabel: isFirstOfYear ? "\(year)" : "\(monthNum)月",
+                year: cal.component(.year, from: sample),
+                month: cal.component(.month, from: sample),
                 days: days,
                 count: pairs.count,
                 seconds: pairs.reduce(0) { $0 + $1.0.durationSeconds }
@@ -245,25 +244,13 @@ private struct TimelineScroller: View {
         return ScrollViewReader { rulerProxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .bottom, spacing: 3) {
-                    ForEach(months) { month in
-                        Button {
-                            onPick(month.id)
-                        } label: {
-                            VStack(spacing: 3) {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(month.id == activeMonthID ? Color.accentColor : Color.accentColor.opacity(0.28))
-                                    .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 28))
-                                Text(month.rulerLabel)
-                                    .font(.caption2)
-                                    .lineLimit(1)
-                                    .foregroundStyle(month.id == activeMonthID ? .primary : .secondary)
-                            }
-                            .frame(width: 46)
-                            .contentShape(Rectangle())
+                    ForEach(Array(months.enumerated()), id: \.element.id) { index, month in
+                        // 年份变化处插一个年份标记，月份自己永远标 "N月"，
+                        // 这样 1 月不会被年份标签顶掉（之前 1 月显示成 "2026"，看起来像统计漏了）
+                        if index == 0 || months[index - 1].year != month.year {
+                            yearMarker(month.year, isFirst: index == 0)
                         }
-                        .buttonStyle(.plain)
-                        .help("\(month.title) · \(month.count) 个素材")
-                        .id(Self.rulerID(month.id))
+                        monthTick(month: month, peak: peak) { onPick(month.id) }
                     }
                 }
                 .padding(.horizontal, 14)
@@ -277,6 +264,43 @@ private struct TimelineScroller: View {
                     rulerProxy.scrollTo(Self.rulerID(newID), anchor: .center)
                 }
             }
+        }
+    }
+
+    /// 刻度尺上的月份柱：高度 = 该月素材数占比，标签固定 "N月"
+    private func monthTick(month: TimelineMonth, peak: Double, onTap: @escaping () -> Void) -> some View {
+        Button(action: onTap) {
+            VStack(spacing: 3) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(month.id == activeMonthID ? Color.accentColor : Color.accentColor.opacity(0.28))
+                    .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 28))
+                Text("\(month.month)月")
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .foregroundStyle(month.id == activeMonthID ? .primary : .secondary)
+            }
+            .frame(width: 38)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(month.title) · \(month.count) 个素材")
+        .id(Self.rulerID(month.id))
+    }
+
+    /// 年份标记：与该年首月之间用一条细分隔线隔开
+    private func yearMarker(_ year: Int, isFirst: Bool) -> some View {
+        HStack(alignment: .bottom, spacing: 4) {
+            if !isFirst {
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.3))
+                    .frame(width: 1)
+                    .frame(maxHeight: .infinity)
+            }
+            Text("\(year)")
+                .font(.caption2)
+                .bold()
+                .foregroundStyle(.secondary)
+                .frame(maxHeight: .infinity, alignment: .bottom)
         }
     }
 

@@ -8,6 +8,7 @@ import AppKit
 /// - `thumbnail(for:)` 是 async 的，直接把图返回给调用方，而不是靠通知"广播"
 /// - `memory` 缓存已解码的 NSImage，滚动回头不用再读盘、再解码
 /// - `limiter` 限制同时解码的视频数量，避免几十个 AVAssetImageGenerator 抢 CPU 把界面拖卡
+/// - `prewarm` 后台补齐整库缩略图，不用滚到才生成
 @MainActor
 final class ThumbnailStore {
     static let shared = ThumbnailStore()
@@ -16,6 +17,7 @@ final class ThumbnailStore {
     private let memory = NSCache<NSString, NSImage>()
     private var inFlight: [String: Task<NSImage?, Never>] = [:]
     private let limiter = DecodeLimiter(limit: 3)
+    private var prewarmTask: Task<Void, Never>?
 
     private init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
@@ -28,42 +30,114 @@ final class ThumbnailStore {
 
     /// 取缩略图：内存命中直接返回；否则读磁盘缓存；再没有才解码视频帧
     func thumbnail(for asset: Asset) async -> NSImage? {
-        let key = cacheKey(for: asset)
+        let key = Self.cacheKey(for: asset)
         if let hit = memory.object(forKey: key as NSString) { return hit }
         if let running = inFlight[key] { return await running.value }
 
-        let dest = cacheDir.appendingPathComponent(key + ".jpg")
-        let path = asset.filePath
-        let limiter = limiter
-
-        let task = Task<NSImage?, Never> { () -> NSImage? in
-            if let disk = await Self.loadFromDisk(dest) { return disk }
-            await limiter.acquire()
-            defer { Task.detached { await limiter.release() } }
-            return await Self.render(path: path, to: dest)
-        }
-
+        let task = makeTask(key: key, path: asset.filePath)
         inFlight[key] = task
-        let image = await task.value
-        inFlight[key] = nil
-        if let image { memory.setObject(image, forKey: key as NSString) }
-        return image
+        // 调用方被取消（比如卡片滚出可视区）时也要清掉登记表，否则会一直堆积
+        defer { inFlight[key] = nil }
+        return await task.value
     }
 
     /// 素材被替换/删除后清掉对应缓存
     func invalidate(_ asset: Asset) {
-        let key = cacheKey(for: asset)
+        let key = Self.cacheKey(for: asset)
         memory.removeObject(forKey: key as NSString)
         inFlight[key]?.cancel()
         inFlight[key] = nil
         try? FileManager.default.removeItem(at: cacheDir.appendingPathComponent(key + ".jpg"))
     }
 
+    /// 后台补齐缺失的缩略图，整库慢慢填满，不用滚到哪才生成哪
+    /// 只在磁盘上没有时才真正解码，已有缓存的素材几乎零成本跳过
+    func prewarm(_ assets: [Asset]) {
+        prewarmTask?.cancel()
+        let dir = cacheDir
+        let keysAndPaths = assets.map { (Self.cacheKey(for: $0), $0.filePath) }
+
+        prewarmTask = Task { [weak self] in
+            // 每批 4 个并发，批间让出主线程，不跟界面抢
+            for chunk in keysAndPaths.chunked(into: 4) {
+                if Task.isCancelled { return }
+                await withTaskGroup(of: Void.self) { group in
+                    for (key, path) in chunk {
+                        group.addTask {
+                            let exists = await Task.detached(priority: .background) {
+                                FileManager.default.fileExists(atPath: dir.appendingPathComponent(key + ".jpg").path)
+                            }.value
+                            guard !exists else { return }
+                            _ = await self?.renderOnly(key: key, path: path)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 清掉不属于当前素材库的缓存文件（旧键、已删除素材留下的孤儿文件）
+    func prune(keeping assets: [Asset]) {
+        let keep = Set(assets.map { Self.cacheKey(for: $0) + ".jpg" })
+        let dir = cacheDir
+        Task.detached(priority: .background) {
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+            var removed = 0
+            for f in files where f.hasSuffix(".jpg") && !keep.contains(f) {
+                try? fm.removeItem(at: dir.appendingPathComponent(f))
+                removed += 1
+            }
+            if removed > 0 { print("[OsmoVault] 清理失效缩略图缓存 \(removed) 个") }
+        }
+    }
+
     // MARK: - 内部实现
 
-    private func cacheKey(for asset: Asset) -> String {
-        // 用路径+大小做缓存键，避开非法文件名字符
-        asset.fileHash + "-" + String(abs(asset.filePath.hashValue))
+    /// 只做后台补齐，不占用 inFlight 登记表、也不往内存缓存塞（避免整库图片常驻内存）
+    private func renderOnly(key: String, path: String) async -> NSImage? {
+        let dest = cacheDir.appendingPathComponent(key + ".jpg")
+        let limiter = self.limiter
+        await limiter.acquire()
+        defer { Task.detached { await limiter.release() } }
+        return await Self.render(path: path, to: dest)
+    }
+
+    private func makeTask(key: String, path: String) -> Task<NSImage?, Never> {
+        let dest = cacheDir.appendingPathComponent(key + ".jpg")
+        let limiter = limiter
+        let memory = memory
+        return Task<NSImage?, Never> { () -> NSImage? in
+            if let disk = await Self.loadFromDisk(dest) {
+                memory.setObject(disk, forKey: key as NSString)
+                return disk
+            }
+            await limiter.acquire()
+            defer { Task.detached { await limiter.release() } }
+            guard let image = await Self.render(path: path, to: dest) else { return nil }
+            // 调用方可能已经被取消，这里仍然落内存缓存，下次进来直接命中
+            memory.setObject(image, forKey: key as NSString)
+            return image
+        }
+    }
+
+    /// 缓存键必须**跨进程稳定**。
+    /// 之前用 `String.hashValue`，而 Swift 的哈希种子每次进程启动都会随机化，
+    /// 导致同一个素材每次启动都算出新键 —— 磁盘缓存 100% 未命中，只能重新解码 4K 视频，
+    /// 缓存目录里同一个素材会被反复写入几十份（实测 156 个素材攒出 2353 个文件 / 194MB）。
+    /// 这里改成 FNV-1a，纯计算、不依赖运行时的随机种子。
+    private static func cacheKey(for asset: Asset) -> String {
+        "\(fnv1a(asset.filePath))-\(asset.fileHash)"
+    }
+
+    /// FNV-1a 64 位：确定性哈希，同一字符串在任何进程里都得到同一个值
+    private static func fnv1a(_ s: String) -> UInt64 {
+        var hash: UInt64 = 14695981039346656037
+        for byte in s.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1099511628211   // FNV prime
+        }
+        return hash
     }
 
     private static func loadFromDisk(_ url: URL) async -> NSImage? {
@@ -126,5 +200,12 @@ private actor DecodeLimiter {
         } else {
             waiters.removeFirst().resume()   // 直接把名额交给等待者，running 不变
         }
+    }
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map { Array(self[$0..<Swift.min($0 + size, count)]) }
     }
 }

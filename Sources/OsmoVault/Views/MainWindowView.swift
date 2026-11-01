@@ -17,11 +17,7 @@ struct MainWindowView: View {
 
     var body: some View {
         NavigationSplitView {
-            VStack(spacing: 0) {
-                SidebarHeaderView(roots: appModel.libraryRoots, assetCount: appModel.assets.count)
-                Divider()
-                SidebarView(selection: $section, assets: appModel.assets)
-            }
+            SidebarView(selection: $section, assets: appModel.assets)
         } content: {
             mainContent
                 .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
@@ -37,15 +33,7 @@ struct MainWindowView: View {
                     Label("导入文件夹", systemImage: "plus.square.on.square")
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    grabFrame()
-                } label: {
-                    Label("截取实况图 (S)", systemImage: "camera.shutter.button")
-                }
-                .disabled(selectedAsset == nil)
-                .keyboardShortcut("s", modifiers: [])
-            }
+            // 截帧入口统一收到右侧「功能区」，这里不再重复放一个按钮
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let folder = urls.first {
@@ -112,22 +100,32 @@ struct MainWindowView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        if let asset = selectedAsset {
-            AssetDetailView(
-                asset: asset,
-                controller: playerController,
-                onRate: { appModel.setRating(id: $0, rating: $1) },
-                onColor: { appModel.setColorLabel(id: $0, label: $1) },
-                onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
-                onGrab: grabFrame
-            )
-            .onAppear { load(asset) }
-            .onChange(of: asset.id) { _, _ in
-                if let a = selectedAsset { load(a) }
+        VStack(spacing: 0) {
+            // 库位置条常驻：一眼能看到当前导入的是哪个文件夹
+            LibraryPathBar(roots: appModel.libraryRoots, assetCount: appModel.assets.count)
+            Divider()
+
+            if let asset = selectedAsset {
+                AssetDetailView(
+                    asset: asset,
+                    controller: playerController,
+                    onRate: { appModel.setRating(id: $0, rating: $1) },
+                    onColor: { appModel.setColorLabel(id: $0, label: $1) },
+                    onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
+                    onGrab: grabFrame,
+                    onDelete: { deleteAsset(asset.id ?? 0) }
+                )
+                .onAppear { load(asset) }
+                .onChange(of: asset.id) { _, _ in
+                    if let a = selectedAsset { load(a) }
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("选择素材查看详情").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } else {
-            Text("选择素材查看详情")
-                .foregroundStyle(.secondary)
         }
     }
 

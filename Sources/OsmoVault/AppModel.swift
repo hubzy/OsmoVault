@@ -61,6 +61,9 @@ final class AppModel: ObservableObject {
 
     func reloadAssets() {
         assets = (try? database.readAssets()) ?? []
+        // 后台补齐缺失的缩略图 + 清掉失效缓存（旧键留下的孤儿文件）
+        ThumbnailStore.shared.prewarm(assets)
+        ThumbnailStore.shared.prune(keeping: assets)
     }
 
     // MARK: - 局部更新

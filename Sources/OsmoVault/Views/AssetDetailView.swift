@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AppKit
 
 /// AVPlayerLayer 视图，替代 AVKit VideoPlayer（后者在 CommandLineTools 工具链下会崩溃）
 struct LayerPlayerView: NSViewRepresentable {
@@ -39,6 +40,9 @@ final class PlayerLayerNSView: NSView {
     }
 }
 
+// MARK: - 详情面板
+
+/// 右侧面板分区：库位置条 → 画面区 → 播放操作区 → 信息区 → 功能区
 struct AssetDetailView: View {
     let asset: Asset
     /// 故意不用 @ObservedObject：时间变化只应重绘控制条和画面，不该每 0.25s 重排整个面板
@@ -47,6 +51,7 @@ struct AssetDetailView: View {
     var onColor: ((Int64, Int) -> Void)?
     var onToggleFavorite: (() -> Void)?
     var onGrab: (() -> Void)?
+    var onDelete: (() -> Void)?
 
     /// 播放器还没报告真实尺寸时，先用素材库里记录的宽高兜底
     private var fallbackRatio: CGFloat {
@@ -57,55 +62,63 @@ struct AssetDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 画面区：吃掉剩余空间，窄窗口下也不低于 160
             PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
-                .frame(minHeight: 200)
-
-            TransportBar(controller: controller, onGrab: onGrab)
-                .padding(.horizontal, 12)
+                .frame(minHeight: 160)
                 .padding(.vertical, 8)
 
             Divider()
 
-            metadataBar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-        }
-    }
+            // 播放操作区
+            VStack(alignment: .leading, spacing: 6) {
+                ZoneHeader("播放")
+                TransportBar(controller: controller)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
-    private var metadataBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(asset.fileName).font(.headline).lineLimit(1)
-                Button {
-                    onToggleFavorite?()
-                } label: {
-                    Image(systemName: asset.isFavorite ? "heart.fill" : "heart")
-                        .foregroundStyle(asset.isFavorite ? .pink : .secondary)
-                }
-                .buttonStyle(.borderless)
-                .help(asset.isFavorite ? "取消收藏" : "收藏")
-                Spacer()
+            Divider()
+
+            // 功能区：图标 + 文字横向居中
+            VStack(alignment: .leading, spacing: 6) {
+                ZoneHeader("操作")
+                ActionSection(asset: asset,
+                              onGrab: onGrab,
+                              onToggleFavorite: onToggleFavorite,
+                              onDelete: onDelete)
             }
-            HStack(spacing: 14) {
-                RatingControl(rating: asset.rating, onChange: { onRate?(asset.id ?? 0, $0) })
-                ColorLabelControl(label: asset.colorLabel, onChange: { onColor?(asset.id ?? 0, $0) })
-                Spacer()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            // 信息区
+            VStack(alignment: .leading, spacing: 8) {
+                ZoneHeader("信息")
+                InfoSection(asset: asset, onRate: onRate, onColor: onColor)
             }
-            HStack(spacing: 12) {
-                if let t = asset.recordedAt { Label(t.formatted(), systemImage: "calendar") }
-                if let lat = asset.latitude, let lon = asset.longitude {
-                    Label(asset.placeName ?? String(format: "%.4f, %.4f", lat, lon), systemImage: "mappin.and.ellipse")
-                }
-                if asset.width > 0 { Label("\(asset.width)×\(asset.height)", systemImage: "photo") }
-                if asset.frameRate > 0 { Label(String(format: "%.0f fps", asset.frameRate), systemImage: "speedometer") }
-                if asset.srtPath != nil { Label("SRT", systemImage: "doc.text") }
-                Spacer()
-            }
-            .font(.caption).foregroundStyle(.secondary)
-            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
     }
 }
+
+// MARK: - 分区小标题
+
+private struct ZoneHeader: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .font(.caption)
+            .bold()
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - 画面区
 
 /// 画面舞台：在可用空间内按真实宽高比取最大内接矩形，上下左右居中
 private struct PlayerStage: View {
@@ -134,10 +147,11 @@ private struct PlayerStage: View {
     }
 }
 
-/// 控制条：进度 + 逐帧 + 倍速 + 音量 + 循环 + 截帧
+// MARK: - 播放操作区
+
+/// 控制条：进度 + 逐帧 + 倍速 + 音量 + 循环。截帧按钮不在这里，归到功能区
 private struct TransportBar: View {
     @ObservedObject var controller: PlayerController
-    var onGrab: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 6) {
@@ -247,8 +261,6 @@ private struct TransportBar: View {
             .buttonStyle(.borderless)
             .help(controller.loopEnabled ? "关闭循环" : "开启循环")
             .frame(width: 26)
-
-            icon("camera.shutter.button", "截取实况图 (S)") { onGrab?() }
         }
     }
 
@@ -268,5 +280,287 @@ private struct TransportBar: View {
     private func fmt(_ s: Double) -> String {
         let t = Int(max(s, 0).rounded())
         return String(format: "%02d:%02d", t / 60, t % 60)
+    }
+}
+
+// MARK: - 信息区
+
+private struct InfoSection: View {
+    let asset: Asset
+    var onRate: ((Int64, Int) -> Void)?
+    var onColor: ((Int64, Int) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(asset.fileName)
+                .font(.headline)
+                .lineLimit(2)
+                .help(asset.fileName)
+
+            VStack(spacing: 5) {
+                infoRow("时间", recordedText)
+                infoRow("地点", locationText)
+                infoRow("规格", specText)
+                infoRow("时长", durationText)
+                infoRow("大小", sizeText)
+                pathRow("路径", asset.filePath)
+                if asset.srtPath != nil {
+                    infoRow("字幕", "已关联 SRT")
+                }
+            }
+
+            HStack(spacing: 12) {
+                RatingControl(rating: asset.rating, onChange: { onRate?(asset.id ?? 0, $0) })
+                ColorLabelControl(label: asset.colorLabel, onChange: { onColor?(asset.id ?? 0, $0) })
+                Spacer()
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .leading)
+            Text(value)
+                .font(.caption)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// 路径单独一行：中段省略 + 右侧按钮直接在访达中选中该文件
+    private func pathRow(_ label: String, _ path: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .leading)
+            Text(abbreviate(path))
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(path)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            } label: {
+                Image(systemName: "arrow.right.circle").font(.caption).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("在访达中显示")
+        }
+    }
+
+    private var recordedText: String {
+        guard let t = asset.recordedAt else { return "未知" }
+        return t.formatted(date: .numeric, time: .shortened)
+    }
+
+    private var locationText: String {
+        if let place = asset.placeName, !place.isEmpty { return place }
+        if let lat = asset.latitude, let lon = asset.longitude {
+            return String(format: "%.4f, %.4f", lat, lon)
+        }
+        return "无 GPS"
+    }
+
+    private var specText: String {
+        var parts: [String] = []
+        if asset.width > 0 { parts.append("\(asset.width)×\(asset.height)") }
+        if asset.frameRate > 0 { parts.append(String(format: "%.0f fps", asset.frameRate)) }
+        if let codec = asset.codec, !codec.isEmpty { parts.append(codec) }
+        return parts.isEmpty ? "未知" : parts.joined(separator: " · ")
+    }
+
+    private var durationText: String {
+        let t = Int(max(asset.durationSeconds, 0).rounded())
+        if t >= 3600 { return String(format: "%d:%02d:%02d", t / 3600, (t % 3600) / 60, t % 60) }
+        return String(format: "%02d:%02d", t / 60, t % 60)
+    }
+
+    private var sizeText: String {
+        ByteCountFormatter.string(fromByteCount: asset.fileSize, countStyle: .file)
+    }
+
+    private func abbreviate(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+}
+
+// MARK: - 功能区
+
+private struct ActionSection: View {
+    let asset: Asset
+    var onGrab: (() -> Void)?
+    var onToggleFavorite: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    var body: some View {
+        // 图标 + 文字横向排列，整组居中；两侧 Spacer 撑开实现居中
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            ActionItem(title: "截取实况图", systemImage: "camera.shutter.button", keyEquivalent: "s") {
+                onGrab?()
+            }
+            ActionItem(title: "在访达中显示", systemImage: "folder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: asset.filePath)])
+            }
+            ActionItem(title: asset.isFavorite ? "取消收藏" : "收藏",
+                       systemImage: asset.isFavorite ? "heart.fill" : "heart",
+                       tint: asset.isFavorite ? .pink : nil) {
+                onToggleFavorite?()
+            }
+            ActionItem(title: "移到回收站", systemImage: "trash", tint: .red) {
+                onDelete?()
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// 功能区按钮：图标在上、文字在下，固定宽度保证四个一排时对齐
+private struct ActionItem: View {
+    let title: String
+    let systemImage: String
+    /// 传入才注册系统快捷键，避免抢走输入框里的按键
+    var keyEquivalent: String?
+    var tint: Color?
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    private var help: String {
+        guard let k = keyEquivalent else { return title }
+        return "\(title) (\(k.uppercased()))"
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15))
+                    .foregroundStyle(tint ?? .primary)
+                Text(title)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)   // 列被拖窄时允许文字缩小，不挤爆整排
+            }
+            .frame(width: 64, height: 46)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(hovering ? Color.primary.opacity(0.10) : Color.primary.opacity(0.05))
+            )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { hovering = $0 }
+        .modifier(ShortcutModifier(keyEquivalent: keyEquivalent))
+    }
+}
+
+/// 可选的快捷键挂载（SwiftUI 里没法在 if-let 里直接加修饰符）
+private struct ShortcutModifier: ViewModifier {
+    let keyEquivalent: String?
+
+    func body(content: Content) -> some View {
+        if let key = keyEquivalent, let first = key.first {
+            content.keyboardShortcut(KeyEquivalent(first), modifiers: [])
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - 库位置条
+
+/// 显示当前库来自哪个文件夹。放在右侧面板顶部常驻，未选中素材时也能看到
+struct LibraryPathBar: View {
+    /// 最近导入的在前；为空表示还没导入过
+    let roots: [String]
+    let assetCount: Int
+
+    @State private var rootIndex = 0
+
+    private var currentPath: String? {
+        guard !roots.isEmpty else { return nil }
+        return roots[min(rootIndex, roots.count - 1)]
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "externaldrive.fill")
+                .foregroundStyle(.secondary)
+                .help("当前库来源")
+
+            if let path = currentPath {
+                Button {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(abbreviate(path))
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "arrow.up.forward.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(path)\n点击在访达中打开")
+
+                // 导入过多个文件夹时可以切换显示哪一个
+                if roots.count > 1 {
+                    Menu {
+                        ForEach(Array(roots.enumerated()), id: \.offset) { index, root in
+                            Button {
+                                rootIndex = index
+                            } label: {
+                                if index == min(rootIndex, roots.count - 1) {
+                                    Image(systemName: "checkmark")
+                                }
+                                Text(abbreviate(root))
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 16)
+                    .help("共 \(roots.count) 个来源文件夹")
+                }
+            } else {
+                Text("尚未导入文件夹")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            Text("\(assetCount) 个素材")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        // 来源数量变化后索引可能越界，自动归位
+        .onChange(of: roots.count) { _, count in
+            if rootIndex > count - 1 { rootIndex = 0 }
+        }
+    }
+
+    /// 家目录缩写为 ~，长路径靠 truncationMode(.middle) 省略
+    private func abbreviate(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
 }

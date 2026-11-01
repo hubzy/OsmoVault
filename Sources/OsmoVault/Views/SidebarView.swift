@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 enum SidebarItem: Hashable {
     case library
@@ -79,89 +78,5 @@ struct SidebarView: View {
         }
         // 整行可点：不加 contentShape 时只有文字那一小条能响应点击，右侧空白点了没反应
         .contentShape(Rectangle())
-    }
-}
-
-/// 侧边栏顶部：显示当前库的来源文件夹，点击可在访达中打开
-struct SidebarHeaderView: View {
-    /// 最近导入的在前；为空表示还没导入过
-    let roots: [String]
-    let assetCount: Int
-
-    @State private var rootIndex = 0
-
-    private var currentPath: String? {
-        guard !roots.isEmpty else { return nil }
-        return roots[min(rootIndex, roots.count - 1)]
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let path = currentPath {
-                HStack(spacing: 4) {
-                    Button {
-                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "folder.fill").foregroundStyle(.secondary)
-                            Text(abbreviate(path))
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)   // 路径中段省略，保留头尾更有信息量
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("\(path)\n点击在访达中打开")
-
-                    // 导入过多个文件夹时给个菜单切换显示哪一个
-                    if roots.count > 1 {
-                        Menu {
-                            ForEach(Array(roots.enumerated()), id: \.offset) { index, root in
-                                Button {
-                                    rootIndex = index
-                                } label: {
-                                    if index == min(rootIndex, roots.count - 1) {
-                                        Image(systemName: "checkmark")
-                                    }
-                                    Text(abbreviate(root))
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        .menuStyle(.borderlessButton)
-                        .frame(width: 16)
-                        .help("共 \(roots.count) 个来源文件夹")
-                    }
-                }
-
-                Text("\(assetCount) 个素材")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 5) {
-                    Image(systemName: "folder").foregroundStyle(.secondary)
-                    Text("尚未导入文件夹").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("点击工具栏 + 导入").font(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        // 来源数量变化后索引可能越界，自动归位
-        .onChange(of: roots.count) { _, count in
-            if rootIndex > count - 1 { rootIndex = 0 }
-        }
-    }
-
-    /// 家目录缩写为 ~，长路径靠 truncationMode(.middle) 省略
-    private func abbreviate(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
 }

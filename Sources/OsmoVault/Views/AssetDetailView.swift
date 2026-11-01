@@ -60,24 +60,48 @@ struct AssetDetailView: View {
         return w / h
     }
 
+    /// 实况照片是否正在播放。换素材时归零，避免上一条的播放态带过来
+    @State private var livePlaying = false
+
+    /// 画面区按类型切换：视频走播放器，照片/实况走静态大图（实况可叠加播放）
+    @ViewBuilder
+    private var stage: some View {
+        switch asset.kind {
+        case .video:
+            PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+        case .photo:
+            PhotoStage(asset: asset)
+        case .livePhoto:
+            LivePhotoStage(asset: asset, controller: controller,
+                           fallbackRatio: fallbackRatio, playing: $livePlaying)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // 画面区：吃掉剩余空间，窄窗口下也不低于 160
-            PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+            stage
                 .frame(minHeight: 160)
                 .padding(.vertical, 8)
 
             Divider()
 
-            // 播放操作区
-            VStack(alignment: .leading, spacing: 6) {
-                ZoneHeader("播放")
-                TransportBar(controller: controller)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            // 播放操作区：纯照片没有可播的东西，整块不显示
+            if asset.kind != .photo {
+                VStack(alignment: .leading, spacing: 6) {
+                    ZoneHeader(asset.kind == .livePhoto ? "实况" : "播放")
+                    if asset.kind == .livePhoto {
+                        LivePhotoBar(controller: controller, playing: $livePlaying,
+                                     seconds: asset.durationSeconds)
+                    } else {
+                        TransportBar(controller: controller)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
 
-            Divider()
+                Divider()
+            }
 
             // 功能区：图标 + 文字横向居中
             VStack(alignment: .leading, spacing: 6) {
@@ -100,7 +124,15 @@ struct AssetDetailView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        // 换素材时停掉上一条的实况
+        .onChange(of: asset.id) { _, _ in
+            livePlaying = false
+        }
     }
+}
+
+private extension NSImage {
+    var ratio: CGFloat { size.height > 0 ? size.width / size.height : 0 }
 }
 
 // MARK: - 分区小标题
@@ -144,6 +176,124 @@ private struct PlayerStage: View {
         guard size.width > 1, size.height > 1, ratio > 0 else { return .zero }
         let width = min(size.width, size.height * ratio)
         return CGSize(width: width, height: width / ratio)
+    }
+}
+
+// MARK: - 照片画面区
+
+/// 静态图舞台：同样按真实比例居中最大化，边界处理与 PlayerStage 一致
+private struct PhotoStage: View {
+    let asset: Asset
+    @State private var image: NSImage?
+    /// 记录 image 属于哪一条素材。
+    /// 从一张图翻到另一张时，外层 switch 走的是同一个分支、视图结构没变，SwiftUI 会**复用**这个
+    /// 视图实例，@State 里还挂着上一张图 —— 原来只判断 `image == nil` 就直接 return，
+    /// 结果翻到第二张显示的还是第一张。必须按素材 id 判断要不要重新加载。
+    @State private var loadedID: Int64?
+
+    private var ratio: CGFloat {
+        let w = CGFloat(asset.width), h = CGFloat(asset.height)
+        guard w > 0, h > 0 else { return 4.0 / 3.0 }
+        return w / h
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let fitted = fit(in: geo.size, ratio: image?.ratio ?? ratio)
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(width: fitted.width, height: fitted.height)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .task(id: asset.id) {
+            guard loadedID != asset.id else { return }
+            // 先回到占位态：不让上一张图继续挂在新素材的画面区上。
+            // 但直接清空会白一下 —— 网格缩略图基本都已缓存，先拿它顶上再换大图
+            image = ThumbnailStore.shared.cachedThumbnail(for: asset)
+            guard !Task.isCancelled else { return }
+            let loaded = await ThumbnailStore.shared.largeImage(for: asset)
+            // 连续快翻时旧任务可能后返回，只认最后一次请求的那条
+            guard !Task.isCancelled else { return }
+            loadedID = asset.id
+            image = loaded ?? image
+        }
+    }
+
+    private func fit(in size: CGSize, ratio: CGFloat) -> CGSize {
+        guard size.width > 1, size.height > 1, ratio > 0 else { return .zero }
+        let width = min(size.width, size.height * ratio)
+        return CGSize(width: width, height: width / ratio)
+    }
+}
+
+/// 实况照片：底图是静态图，播放时在上面叠播放器
+private struct LivePhotoStage: View {
+    let asset: Asset
+    let controller: PlayerController
+    let fallbackRatio: CGFloat
+    @Binding var playing: Bool
+
+    var body: some View {
+        ZStack {
+            PhotoStage(asset: asset)
+            if playing {
+                PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+            }
+        }
+    }
+}
+
+/// 实况照片的操作条：只留播放/停止 + 时长，不需要逐帧、倍速那套
+private struct LivePhotoBar: View {
+    @ObservedObject var controller: PlayerController
+    @Binding var playing: Bool
+    let seconds: Double
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                playing.toggle()
+                if playing {
+                    controller.playFromStart()
+                } else {
+                    controller.pause()
+                }
+            } label: {
+                Image(systemName: playing ? "stop.fill" : "play.fill")
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.borderless)
+            .help(playing ? "停止" : "播放实况")
+            .frame(width: 28)
+
+            Text(seconds > 0 ? "实况片段 \(String(format: "%.1f", seconds)) 秒" : "实况片段")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            Button {
+                controller.toggleMute()
+            } label: {
+                Image(systemName: controller.volumeIcon)
+            }
+            .buttonStyle(.borderless)
+            .help(controller.isMuted ? "取消静音" : "静音")
+            .frame(width: 26)
+        }
+        // 离开这张素材时停掉，避免下一条素材继续在后台播
+        .onDisappear {
+            playing = false
+            controller.pause()
+        }
     }
 }
 
@@ -298,10 +448,11 @@ private struct InfoSection: View {
                 .help(asset.fileName)
 
             VStack(spacing: 5) {
+                infoRow("类型", asset.kind.name)
                 infoRow("时间", recordedText)
                 infoRow("地点", locationText)
                 infoRow("规格", specText)
-                infoRow("时长", durationText)
+                if asset.kind != .photo { infoRow("时长", durationText) }
                 infoRow("大小", sizeText)
                 pathRow("路径", asset.filePath)
                 if asset.srtPath != nil {
@@ -403,8 +554,11 @@ private struct ActionSection: View {
         // 图标 + 文字横向排列，整组居中；两侧 Spacer 撑开实现居中
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            ActionItem(title: "截取实况图", systemImage: "camera.shutter.button", keyEquivalent: "s") {
-                onGrab?()
+            // 纯照片没有可截的帧，按钮不给出现（S 快捷键也随之失效）
+            if asset.kind != .photo {
+                ActionItem(title: "截取实况图", systemImage: "camera.shutter.button", keyEquivalent: "s") {
+                    onGrab?()
+                }
             }
             ActionItem(title: "在访达中显示", systemImage: "folder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: asset.filePath)])

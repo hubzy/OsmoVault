@@ -184,7 +184,12 @@ struct MainWindowView: View {
     }
 
     private func load(_ asset: Asset) {
-        playerController.load(url: URL(fileURLWithPath: asset.filePath))
+        // 照片没得播；实况照片加载它的动态部分
+        guard let path = asset.playbackPath else {
+            playerController.unload()
+            return
+        }
+        playerController.load(url: URL(fileURLWithPath: path))
     }
 
     // MARK: - 操作
@@ -196,9 +201,16 @@ struct MainWindowView: View {
 
     private func grabFrame() {
         guard let asset = selectedAsset else { return }
+        // 照片本身就是图，实况照片取其动态部分的当前帧
+        guard let sourcePath = asset.playbackPath else {
+            grabStatus = "照片无需截取"
+            return
+        }
+        var target = asset
+        target.filePath = sourcePath
         let seconds = playerController.currentTime
         do {
-            let url = try FrameGrabService.grab(asset: asset, at: seconds)
+            let url = try FrameGrabService.grab(asset: target, at: seconds)
             grabStatus = "已保存实况图：\(url.lastPathComponent)"
         } catch {
             grabStatus = "截取失败：\(error.localizedDescription)"

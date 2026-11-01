@@ -74,7 +74,7 @@ struct QuickCutPanel: View {
         DisclosureGroup(isExpanded: $showPool) {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(appModel.assets) { asset in
+                    ForEach(videoAssets) { asset in
                         poolCell(asset)
                     }
                 }
@@ -84,7 +84,7 @@ struct QuickCutPanel: View {
         } label: {
             HStack(spacing: 6) {
                 Text("素材池").font(.headline)
-                Text(pickedIDs.isEmpty ? "（未勾选 = 用全部 \(appModel.assets.count) 个）" : "（已选 \(pickedIDs.count) 个）")
+                Text(pickedIDs.isEmpty ? "（未勾选 = 用全部 \(videoAssets.count) 个）" : "（已选 \(pickedIDs.count) 个）")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !pickedIDs.isEmpty {
@@ -241,10 +241,15 @@ struct QuickCutPanel: View {
 
     // MARK: - 逻辑
 
+    /// 出片只接视频；照片/实况进不了时间线（要做成片段得先转码，暂不支持）
+    private var videoAssets: [Asset] {
+        appModel.assets.filter { $0.kind == .video }
+    }
+
     private var poolAssets: [Asset] {
         let base = pickedIDs.isEmpty
-            ? appModel.assets
-            : appModel.assets.filter { pickedIDs.contains($0.id ?? 0) }
+            ? videoAssets
+            : videoAssets.filter { pickedIDs.contains($0.id ?? 0) }
         let filtered = onlyHighRated ? base.filter { $0.rating >= 4 } : base
         return filtered.sorted { ($0.recordedAt ?? .distantPast) < ($1.recordedAt ?? .distantPast) }
     }

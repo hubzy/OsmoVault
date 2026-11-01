@@ -23,6 +23,9 @@ struct SmartAlbum: Identifiable, Hashable {
     static func builtin(now: Date = Date()) -> [SmartAlbum] {
         let day: TimeInterval = 24 * 3600
         return [
+            SmartAlbum(id: "kindVideo", name: "视频", systemImage: "video") { $0.kind == .video },
+            SmartAlbum(id: "kindPhoto", name: "照片", systemImage: "photo") { $0.kind == .photo },
+            SmartAlbum(id: "kindLive", name: "实况照片", systemImage: "livephoto") { $0.kind == .livePhoto },
             SmartAlbum(id: "favorite", name: "收藏", systemImage: "heart.fill") { $0.isFavorite },
             SmartAlbum(id: "topRated", name: "高评分", systemImage: "star.fill") { $0.rating >= 4 },
             SmartAlbum(id: "unrated", name: "待评级", systemImage: "star") { $0.rating == 0 },

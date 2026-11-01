@@ -63,6 +63,9 @@ struct AssetGridView: View {
 struct AsyncThumbView: View {
     let asset: Asset
     @State private var thumb: NSImage?
+    /// 缩略图属于哪条素材。切换筛选/来源后 cell 会被复用到另一条素材上，
+    /// 只判 `thumb == nil` 会把上一条的图留着不发新的请求
+    @State private var loadedID: Int64?
 
     var body: some View {
         // 同样是弹性骨架 + overlay，避免 .fill 的固有宽高比撑破外框
@@ -80,8 +83,12 @@ struct AsyncThumbView: View {
             }
             .clipped()
             .task(id: asset.id) {
-                guard thumb == nil else { return }
-                thumb = await ThumbnailStore.shared.thumbnail(for: asset)
+                guard loadedID != asset.id else { return }
+                thumb = nil
+                let loaded = await ThumbnailStore.shared.thumbnail(for: asset)
+                guard !Task.isCancelled else { return }
+                loadedID = asset.id
+                thumb = loaded
             }
     }
 }
@@ -97,6 +104,9 @@ struct AssetCell: View {
     @State private var previewOn = false
     @State private var hoverTask: Task<Void, Never>?
     @State private var thumb: NSImage?
+    /// 缩略图属于哪条素材。LazyVStack 会复用 cell，切换筛选后可能拿另一条素材
+    /// 填到同一个位置上，只判 `thumb == nil` 会一直显示上一条的图
+    @State private var loadedID: Int64?
 
     /// 媒体区统一高度：横竖屏在同一行内等高显示，竖屏按比例变窄
     private var mediaHeight: CGFloat { 150 }
@@ -139,9 +149,10 @@ struct AssetCell: View {
                                 .fill(Color.gray.opacity(0.18))
                                 .overlay { Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary) }
                         }
-                        // 缩略图垫底 + 播放器叠加：首帧解码前不闪黑
-                        if previewOn {
-                            HoverPreviewPlayer(url: URL(fileURLWithPath: asset.filePath))
+                        // 缩略图垫底 + 播放器叠加：首帧解码前不闪黑。
+                        // 实况照片播它的动态部分；纯照片不起播
+                        if previewOn, let playPath = asset.playbackPath {
+                            HoverPreviewPlayer(url: URL(fileURLWithPath: playPath))
                         }
                     }
                 }
@@ -154,12 +165,28 @@ struct AssetCell: View {
                         .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
                 )
 
-            Text(Self.durationText(asset.durationSeconds))
-                .font(.caption2).monospacedDigit()
-                .padding(.horizontal, 5).padding(.vertical, 2)
-                .background(.black.opacity(0.55), in: Capsule())
-                .foregroundStyle(.white)
-                .padding(6)
+            // 照片没有时长，改标类型；视频/实况标时长（实况另加一个角标记号）
+            HStack(spacing: 4) {
+                if asset.kind == .livePhoto {
+                    Image(systemName: "livephoto")
+                        .font(.caption2)
+                        .foregroundStyle(.white)
+                        .help("实况照片")
+                }
+                if asset.kind == .photo {
+                    Image(systemName: "photo")
+                        .font(.caption2)
+                        .foregroundStyle(.white)
+                        .help("照片")
+                } else {
+                    Text(Self.durationText(asset.durationSeconds))
+                        .font(.caption2).monospacedDigit()
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(.black.opacity(0.55), in: Capsule())
+            .padding(6)
         }
         .overlay(alignment: .topTrailing) {
             if asset.isFavorite || (isHovered && onToggleFavorite != nil) {
@@ -184,8 +211,14 @@ struct AssetCell: View {
             }
         }
         .task(id: asset.id) {
-            guard thumb == nil else { return }
-            thumb = await ThumbnailStore.shared.thumbnail(for: asset)
+            guard loadedID != asset.id else { return }
+            thumb = nil
+            previewOn = false
+            hoverTask?.cancel()
+            let loaded = await ThumbnailStore.shared.thumbnail(for: asset)
+            guard !Task.isCancelled else { return }
+            loadedID = asset.id
+            thumb = loaded
         }
     }
 

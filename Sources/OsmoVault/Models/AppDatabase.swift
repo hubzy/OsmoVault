@@ -53,6 +53,13 @@ final class AppDatabase {
                 t.add(column: "isDeleted", .boolean).notNull().defaults(to: false)
             }
         }
+        // 支持照片 / 实况照片：老记录默认 0（视频），pairedVideoPath 为空
+        migrator.registerMigration("v3") { db in
+            try db.alter(table: "asset") { t in
+                t.add(column: "mediaType", .integer).notNull().defaults(to: 0)
+                t.add(column: "pairedVideoPath", .text)
+            }
+        }
         return migrator
     }
 

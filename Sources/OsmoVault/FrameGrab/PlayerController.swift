@@ -40,6 +40,20 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    /// 切到照片 / 没有可播内容时调用：彻底卸掉当前 item。
+    /// 只 pause 不够 —— 留在 player 里的旧 item 会让"照片 → 同一条视频"因为
+    /// `loadedPath` 相同被 `load` 提前 return，画面停在暂停状态不重新起播
+    func unload() {
+        teardownItemObservers()
+        pause()
+        loadedPath = nil
+        isReady = false
+        duration = 0
+        currentTime = 0
+        videoRatio = nil
+        player.replaceCurrentItem(with: nil)
+    }
+
     func load(url: URL) {
         guard loadedPath != url.path else { return }
         loadedPath = url.path
@@ -122,6 +136,13 @@ final class PlayerController: ObservableObject {
     func pause() {
         player.rate = 0
         isPlaying = false
+    }
+
+    /// 从头播放（实况照片用）
+    func playFromStart() {
+        seek(to: 0)
+        player.rate = playbackRate
+        isPlaying = true
     }
 
     /// 拖动结束时调用：真正跳转

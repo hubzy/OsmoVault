@@ -15,6 +15,8 @@ final class ThumbnailStore {
 
     private let cacheDir: URL
     private let memory = NSCache<NSString, NSImage>()
+    /// 详情页用的大图缓存，单独一份且容量小：整张原图常驻内存会把内存吃穿
+    private let largeMemory = NSCache<NSString, NSImage>()
     private var inFlight: [String: Task<NSImage?, Never>] = [:]
     private let limiter = DecodeLimiter(limit: 3)
     private var prewarmTask: Task<Void, Never>?
@@ -24,6 +26,7 @@ final class ThumbnailStore {
         cacheDir = caches.appendingPathComponent("OsmoVault/thumbnails", isDirectory: true)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
         memory.countLimit = 600
+        largeMemory.countLimit = 8
     }
 
     // MARK: - 对外接口
@@ -39,6 +42,27 @@ final class ThumbnailStore {
         // 调用方被取消（比如卡片滚出可视区）时也要清掉登记表，否则会一直堆积
         defer { inFlight[key] = nil }
         return await task.value
+    }
+
+    /// 详情页看照片用：解码到最长边 1600 就够看了，不必把几十 MB 的原图整个展开
+    func largeImage(for asset: Asset) async -> NSImage? {
+        let key = "large-\(Self.cacheKey(for: asset))"
+        if let hit = largeMemory.object(forKey: key as NSString) { return hit }
+        guard let image = await Self.renderLarge(path: asset.filePath) else { return nil }
+        largeMemory.setObject(image, forKey: key as NSString)
+        return image
+    }
+
+    /// 只取**已经生成好**的缩略图（内存或磁盘），绝不触发解码。
+    /// 详情页翻图时先拿它顶上，避免大图解码期间白屏；顺带不占 DecodeLimiter 的名额
+    func cachedThumbnail(for asset: Asset) -> NSImage? {
+        let key = Self.cacheKey(for: asset)
+        if let hit = memory.object(forKey: key as NSString) { return hit }
+        let dest = cacheDir.appendingPathComponent(key + ".jpg")
+        guard let data = try? Data(contentsOf: dest),
+              let image = NSImage(data: data) else { return nil }
+        memory.setObject(image, forKey: key as NSString)
+        return image
     }
 
     /// 素材被替换/删除后清掉对应缓存
@@ -152,6 +176,10 @@ final class ThumbnailStore {
 
     private static func render(path: String, to dest: URL) async -> NSImage? {
         await Task.detached(priority: .utility) { () -> NSImage? in
+            // 照片走 ImageIO 直接取缩略图，比解码一帧视频快一个量级；
+            // 实况照片也用静态图部分，动态部分只在 hover / 详情里才解
+            if let image = Self.renderImage(path: path, to: dest) { return image }
+
             let avAsset = AVURLAsset(url: URL(fileURLWithPath: path))
             let gen = AVAssetImageGenerator(asset: avAsset)
             gen.appliesPreferredTrackTransform = true
@@ -167,13 +195,48 @@ final class ThumbnailStore {
 
             guard let cg = try? gen.copyCGImage(at: target, actualTime: nil) else { return nil }
             let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            if let tiff = image.tiffRepresentation,
-               let rep = NSBitmapImageRep(data: tiff),
-               let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75]) {
-                try? jpeg.write(to: dest)
-            }
+            Self.writeJPEG(image, to: dest)
             return image
         }.value
+    }
+
+    nonisolated private static func renderLarge(path: String) async -> NSImage? {
+        await Task.detached(priority: .utility) { () -> NSImage? in
+            let url = URL(fileURLWithPath: path)
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1600,
+                // 详情里偶尔会连续翻图，缓存住解码结果能明显减少等待
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+            return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }.value
+    }
+
+    /// 图片缩略图：让 ImageIO 直接生成缩略图（会带 EXIF 方向），非图片返回 nil
+    nonisolated private static func renderImage(path: String, to dest: URL) -> NSImage? {
+        let url = URL(fileURLWithPath: path)
+        guard MediaScanner.imageExtensions.contains(url.pathExtension.lowercased()),
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,   // 按 EXIF 方向摆正
+            kCGImageSourceThumbnailMaxPixelSize: 400
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        Self.writeJPEG(image, to: dest)
+        return image
+    }
+
+    nonisolated private static func writeJPEG(_ image: NSImage, to dest: URL) {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75]) else { return }
+        try? jpeg.write(to: dest)
     }
 }
 

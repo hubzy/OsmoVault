@@ -178,12 +178,35 @@ final class AppModel: ObservableObject {
     func duplicateGroups() -> [[Asset]] {
         var buckets: [String: [Asset]] = [:]
         for a in assets {
-            let key = "\(a.fileSize)-\(Int((a.durationSeconds * 1000).rounded()))"
+            let key = Self.duplicateKey(for: a)
             buckets[key, default: []].append(a)
         }
         return buckets.values
             .filter { $0.count > 1 }
             .sorted { ($0.first?.fileName ?? "") < ($1.first?.fileName ?? "") }
+    }
+
+    /// 重复判据：视频用「大小 + 时长」；照片没有时长，光看大小会把一堆同样大的照片
+    /// 误判成重复，所以照片用「大小 + 尺寸 + 头部 256KB 指纹」
+    private static func duplicateKey(for a: Asset) -> String {
+        let size = "\(a.fileSize)"
+        if a.kind == .video || a.durationSeconds > 0 {
+            return "v-\(size)-\(Int((a.durationSeconds * 1000).rounded()))"
+        }
+        return "p-\(size)-\(a.width)x\(a.height)-\(headFingerprint(a.filePath))"
+    }
+
+    /// 读文件开头 256KB 算 FNV：两张真重复的照片头必然一致，成本也就一次小读盘
+    private static func headFingerprint(_ path: String) -> UInt64 {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return 0 }
+        defer { try? handle.close() }
+        let data = handle.readData(ofLength: 256 * 1024)
+        var hash: UInt64 = 14695981039346656037
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash = hash &* 1099511628211
+        }
+        return hash
     }
 
     /// 每组保留最早入库的那一个，其余作为重复项返回

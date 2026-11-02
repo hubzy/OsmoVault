@@ -22,15 +22,14 @@ struct SidebarView: View {
     /// 右键来源 → 从库中移除
     var onRemoveSource: ((String) -> Void)?
     var duplicateCount: Int = 0
+    /// 智能相册 id → 数量。由外部（AppModel）算好缓存后传进来：
+    /// 13 个相册各 filter 一遍 8000 条，放在这里算就是每次 body 13 万次判断
+    var albumCounts: [String: Int] = [:]
+    /// 拍摄地 → 数量，同上
+    var placeCounts: [(name: String, count: Int)] = []
 
-    /// 只在素材或选中变化时才重算，避免 hover 之类的操作触发整条侧边栏重排
     private var albums: [(album: SmartAlbum, count: Int)] {
-        SmartAlbum.builtin().map { ($0, $0.filter(assets).count) }
-    }
-
-    private var places: [(name: String, count: Int)] {
-        let grouped = Dictionary(grouping: assets.compactMap(\.placeName), by: { $0 })
-        return grouped.map { ($0.key, $0.value.count) }.sorted { $0.count > $1.count }
+        SmartAlbum.builtin().map { ($0, albumCounts[$0.id] ?? 0) }
     }
 
     var body: some View {
@@ -72,9 +71,9 @@ struct SidebarView: View {
                 }
             }
 
-            if !places.isEmpty {
+            if !placeCounts.isEmpty {
                 Section("拍摄地") {
-                    ForEach(places, id: \.name) { place in
+                    ForEach(placeCounts, id: \.name) { place in
                         row(icon: "mappin.and.ellipse", title: place.name, count: place.count)
                             .tag(SidebarItem.place(place.name))
                     }

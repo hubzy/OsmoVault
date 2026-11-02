@@ -7,6 +7,8 @@ struct AssetGridView: View {
     var onRate: (Int64, Int) -> Void = { _, _ in }
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
+    /// 卡片滚进可视区时回调。缩略图改成按需生成后，靠它把"当前看到哪"传给 AppModel
+    var onVisible: ((Int64) -> Void)?
     var emptyHint: String?
     /// 嵌入别的滚动容器（比如时间轴）时置 true：不再套自己的 ScrollView，避免双层滚动
     var embedded = false
@@ -38,6 +40,8 @@ struct AssetGridView: View {
                       onToggleFavorite: onToggleFavorite == nil ? nil : { onToggleFavorite?(asset.id ?? 0) })
                 .contentShape(Rectangle())
                 .onTapGesture { selectedAssetID = asset.id }
+                // LazyVGrid 只实例化可视区的 cell，所以这里天然就是"滚到才生成"
+                .onAppear { if let id = asset.id { onVisible?(id) } }
                 .contextMenu {
                     Button(asset.isFavorite ? "取消收藏" : "收藏") {
                         onToggleFavorite?(asset.id ?? 0)

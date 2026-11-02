@@ -91,6 +91,34 @@ final class AppDatabase {
         }
     }
 
+    /// 批量写入（一个事务）。扫描 8000 条素材时逐条 `save` 就是 8000 次事务 + fsync，
+    /// 这是导入卡住的主要原因之一。`didInsert` 仍会回填 id。
+    func saveBatch(_ assets: inout [Asset]) throws {
+        guard !assets.isEmpty else { return }
+        try dbWriter.write { db in
+            for i in assets.indices {
+                try assets[i].save(db)
+            }
+        }
+    }
+
+    /// 一次把去重需要的索引读进内存。扫描时对每个文件发两次 SQL（8000 × 2 次查询）
+    /// 换成扫开始前的一次全表投影 + 内存 Set 判断
+    func existingIndex() -> (paths: Set<String>, hashes: Set<String>) {
+        (try? dbReader.read { db in
+            var paths = Set<String>()
+            var hashes = Set<String>()
+            var rows = try Row.fetchAll(db, sql: "SELECT filePath, fileHash FROM asset")
+            paths.reserveCapacity(rows.count)
+            hashes.reserveCapacity(rows.count)
+            for row in rows {
+                paths.insert(row["filePath"])
+                hashes.insert(row["fileHash"])
+            }
+            return (paths, hashes)
+        }) ?? ([], [])
+    }
+
     func updateRating(id: Int64, rating: Int) throws {
         try dbWriter.write { db in
             try db.execute(sql: "UPDATE asset SET rating = ? WHERE id = ?", arguments: [rating, id])

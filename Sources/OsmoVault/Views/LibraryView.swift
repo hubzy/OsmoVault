@@ -5,11 +5,25 @@ import SwiftUI
 struct LibraryView: View {
     var title: String = "图库"
     let assets: [Asset]
+    /// 素材集合版本。分组、排序、统计都是 O(n log n)，放在 body 里会被
+    /// 每次重绘重算（8000 条时一次就是几十毫秒），改成按版本缓存
+    var version: UInt64 = 0
     @Binding var selectedAssetID: Int64?
     var onRate: (Int64, Int) -> Void = { _, _ in }
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
+    /// 卡片滚进可视区时回调，用于按需生成缩略图
+    var onVisible: ((Int64) -> Void)?
     var emptyHint: String?
+
+    @State private var sections: [TimelineMonth] = []
+    @State private var undated: [Asset] = []
+    @State private var summaryText = ""
+
+    /// 版本 + 数量 + 首条 id：切换筛选时 version 不变但内容变了，也要触发重算
+    private var cacheKey: String {
+        "\(version)|\(assets.count)|\(assets.first?.id ?? -1)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +31,14 @@ struct LibraryView: View {
             Divider()
             content
         }
+        .onChange(of: cacheKey, initial: true) { _, _ in recompute() }
+    }
+
+    private func recompute() {
+        let built = buildSections()
+        sections = built
+        undated = assets.filter { $0.recordedAt == nil }
+        summaryText = makeSummary()
     }
 
     // MARK: - 顶部：标题 + 总量统计 + 视图切换
@@ -25,11 +47,11 @@ struct LibraryView: View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.title2).bold()
-                Text(summary)
+                Text(summaryText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help(summary)
+                    .help(summaryText)
             }
             Spacer(minLength: 0)
         }
@@ -38,7 +60,7 @@ struct LibraryView: View {
     }
 
     /// 数量 + 时间跨度 + 总时长，一行说清楚当前集合有多大
-    private var summary: String {
+    private func makeSummary() -> String {
         let seconds = assets.reduce(0) { $0 + $1.durationSeconds }
         var parts = ["\(assets.count) 个素材"]
         let span = spanText
@@ -48,8 +70,15 @@ struct LibraryView: View {
     }
 
     private var spanText: String {
-        let dates = assets.compactMap(\.recordedAt).sorted()
-        guard let first = dates.first, let last = dates.last else { return "暂无时间信息" }
+        // 只要最小值和最大值，不需要排序（原来 sort 一遍 8000 个 Date 纯属浪费）
+        var min: Date?
+        var max: Date?
+        for a in assets {
+            guard let t = a.recordedAt else { continue }
+            if min == nil || t < min! { min = t }
+            if max == nil || t > max! { max = t }
+        }
+        guard let first = min, let last = max else { return "暂无时间信息" }
         let fmt = Self.isoFormatter
         let a = fmt.string(from: first), b = fmt.string(from: last)
         return a == b ? a : "\(a) – \(b)"
@@ -77,9 +106,9 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var timelineContent: some View {
-        // 分组只算一次再往下传：放在子视图里各自调用会重复计算好几遍
-        let months = buildSections()
-        let noDate = assets.filter { $0.recordedAt == nil }
+        // 分组结果缓存在 @State 里，不在这里现算
+        let months = sections
+        let noDate = undated
 
         if months.isEmpty && noDate.isEmpty {
             VStack(spacing: 10) {
@@ -94,7 +123,8 @@ struct LibraryView: View {
             TimelineScroller(months: months, undated: noDate,
                              selectedAssetID: $selectedAssetID,
                              onRate: onRate, onDelete: onDelete,
-                             onToggleFavorite: onToggleFavorite)
+                             onToggleFavorite: onToggleFavorite,
+                             onVisible: onVisible)
         }
     }
 
@@ -193,6 +223,7 @@ private struct TimelineScroller: View {
     var onRate: (Int64, Int) -> Void
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
+    var onVisible: ((Int64) -> Void)?
 
     /// 与列表滚动位置双向绑定的原始值，滚动过程中可能短暂回写 nil
     @State private var scrolledMonthID: String?
@@ -223,7 +254,8 @@ private struct TimelineScroller: View {
                                         }
                                         AssetGridView(assets: day.items, selectedAssetID: $selectedAssetID,
                                                       onRate: onRate, onDelete: onDelete,
-                                                      onToggleFavorite: onToggleFavorite, embedded: true)
+                                                      onToggleFavorite: onToggleFavorite,
+                                                      onVisible: onVisible, embedded: true)
                                     }
                                 }
                             } header: {
@@ -245,7 +277,8 @@ private struct TimelineScroller: View {
                             Section {
                                 AssetGridView(assets: undated, selectedAssetID: $selectedAssetID,
                                               onRate: onRate, onDelete: onDelete,
-                                              onToggleFavorite: onToggleFavorite, embedded: true)
+                                              onToggleFavorite: onToggleFavorite,
+                                              onVisible: onVisible, embedded: true)
                             } header: {
                                 HStack(spacing: 8) {
                                     Text("未知拍摄时间").font(.title3).bold()

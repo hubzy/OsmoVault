@@ -3,6 +3,9 @@ import SwiftUI
 @MainActor
 final class AppModel: ObservableObject {
     @Published var assets: [Asset] = []
+    /// 素材集合的版本号。视图用它判断缓存的分组结果要不要重算，
+    /// 不用去比较 8000 条 Asset（值类型，逐条 Equatable 太贵）
+    @Published private(set) var assetsVersion: UInt64 = 0
     @Published var isScanning = false
     @Published var scanProgress: ScanProgress?
     /// 导入过的文件夹，最近导入的在前
@@ -25,6 +28,12 @@ final class AppModel: ObservableObject {
         self.scanRoots = UserDefaults.standard.stringArray(forKey: Self.rootsKey) ?? []
         self.importHistory = Self.loadHistory()
         reloadAssets()
+        // 老版本会把每张实况照片的动态视频都抽出来落盘，几千张能攒到几十 GB，
+        // 而且新代码会直接复用已有文件、不会主动缩。启动时按配额清一次。
+        Task.detached(priority: .background) {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)   // 避开启动高峰
+            MotionPhoto.trimCache()
+        }
     }
 
     // MARK: - 导入历史持久化
@@ -63,42 +72,11 @@ final class AppModel: ObservableObject {
 
     // MARK: - 来源文件夹
 
-    /// 来源文件夹：记录的导入目录 + 库里有素材但不被任何记录目录覆盖的目录
-    /// （老版本导入的内容没有记录，只能从素材路径反推出来，否则会凭空少一个来源）
-    var libraryRoots: [String] {
-        var roots = scanRoots.filter { !$0.isEmpty }
-        let dirs = Set(assets.map { ($0.filePath as NSString).deletingLastPathComponent })
-            .filter { !$0.isEmpty }
-        let uncovered = dirs.filter { d in !roots.contains(where: { d.hasPrefix($0) }) }
-        roots.append(contentsOf: uncovered.sorted())
-        return roots
-    }
-
     private func addScanRoot(_ path: String) {
         var roots = scanRoots.filter { $0 != path }
         roots.insert(path, at: 0)
         scanRoots = roots
         UserDefaults.standard.set(roots, forKey: Self.rootsKey)
-    }
-
-    /// 各来源文件夹下的素材数。路径有包含关系时按最长前缀匹配，避免计入更上层目录
-    var rootAssetCounts: [String: Int] {
-        var counts: [String: Int] = [:]
-        let roots = libraryRoots
-        for a in assets {
-            var best: String?
-            for r in roots where a.filePath.hasPrefix(r) {
-                if let b = best { if r.count > b.count { best = r } } else { best = r }
-            }
-            if let best { counts[best, default: 0] += 1 }
-        }
-        return counts
-    }
-
-    /// 侧边栏「导入来源」用：文件夹 → 素材数
-    var sourceItems: [(path: String, count: Int)] {
-        let counts = rootAssetCounts
-        return libraryRoots.map { (path: $0, count: counts[$0] ?? 0) }
     }
 
     /// 某个来源文件夹最近一次导入的时间，菜单/提示里显示
@@ -109,12 +87,147 @@ final class AppModel: ObservableObject {
     /// 没有导入历史时的兜底记录
     private var fallbackImport: ImportRecord?
 
+    // MARK: - 派生数据缓存
+
+    /// 这些都是 O(n) 甚至 O(n·m) 的计算。放在 computed property 里会被 SwiftUI
+    /// **每次 body 重算** —— 8000 条素材时一个 hover 就能让主线程跑几十毫秒。
+    /// 按 assetsVersion 失效，一次重算供多次渲染使用。
+    private struct Derived {
+        var roots: [String] = []
+        var rootCounts: [String: Int] = [:]
+        var sources: [(path: String, count: Int)] = []
+        var duplicateCount: Int = 0
+        var albumCounts: [String: Int] = [:]
+        var places: [(name: String, count: Int)] = []
+        var index: [Int64: Asset] = [:]      // id → 素材，避免线性查找
+        var geotagged: [Asset] = []          // 带 GPS 的素材，地图页专用
+        var order: [Int64: Int] = [:]        // id → 在 assets 里的下标，缩略图按窗口补齐时用
+    }
+
+    private var derived = Derived()
+    private var derivedVersion: UInt64 = 0
+    private var derivedStale = true
+
+    private func invalidateDerived() {
+        derivedStale = true
+        assetsVersion &+= 1
+    }
+
+    private func currentDerived() -> Derived {
+        if derivedStale || derivedVersion != assetsVersion {
+            derived = buildDerived()
+            derivedVersion = assetsVersion
+            derivedStale = false
+        }
+        return derived
+    }
+
+    private func buildDerived() -> Derived {
+        var d = Derived()
+        d.index = Dictionary(uniqueKeysWithValues: assets.compactMap { a in
+            a.id.map { ($0, a) }
+        })
+
+        // 来源文件夹：记录的导入目录 + 库里有素材但不被任何记录目录覆盖的目录
+        var roots = scanRoots.filter { !$0.isEmpty }
+        var dirs = Set(assets.map { ($0.filePath as NSString).deletingLastPathComponent })
+        dirs.remove("")
+        let uncovered = dirs.filter { dir in !roots.contains(where: { dir.hasPrefix($0) }) }
+        roots.append(contentsOf: uncovered.sorted())
+        d.roots = roots
+
+        var counts: [String: Int] = [:]
+        counts.reserveCapacity(roots.count)
+        for a in assets {
+            var best: String?
+            for r in roots where a.filePath.hasPrefix(r) {
+                if let b = best { if r.count > b.count { best = r } } else { best = r }
+            }
+            if let best { counts[best, default: 0] += 1 }
+        }
+        d.rootCounts = counts
+        d.sources = roots.map { (path: $0, count: counts[$0] ?? 0) }
+
+        d.duplicateCount = Self.countDuplicateGroups(assets)
+
+        var albumCounts: [String: Int] = [:]
+        for album in SmartAlbum.builtin() {
+            albumCounts[album.id] = album.filter(assets).count
+        }
+        d.albumCounts = albumCounts
+
+        let grouped = Dictionary(grouping: assets.compactMap(\.placeName), by: { $0 })
+        d.places = grouped.map { ($0.key, $0.value.count) }.sorted { $0.count > $1.count }
+
+        d.geotagged = assets.filter { $0.latitude != nil && $0.longitude != nil }
+
+        var order: [Int64: Int] = [:]
+        order.reserveCapacity(assets.count)
+        for (i, a) in assets.enumerated() {
+            if let id = a.id { order[id] = i }
+        }
+        d.order = order
+        return d
+    }
+
+    // MARK: - 对外派生数据
+
+    var libraryRoots: [String] { currentDerived().roots }
+    var rootAssetCounts: [String: Int] { currentDerived().rootCounts }
+    var sourceItems: [(path: String, count: Int)] { currentDerived().sources }
+    /// 重复素材的组数（侧边栏只显示数量，不建分组对象）
+    var duplicateCount: Int { currentDerived().duplicateCount }
+    var albumCounts: [String: Int] { currentDerived().albumCounts }
+    var places: [(name: String, count: Int)] { currentDerived().places }
+
+    /// 按 id 取素材。原来 `assets.first { $0.id == id }` 是 O(n)，
+    /// 选中态每帧都要查一次
+    func asset(id: Int64) -> Asset? { currentDerived().index[id] }
+    /// 带 GPS 的素材。地图页每次 body 都 filter 一遍 8000 条会拖垮主线程
+    var geotaggedAssets: [Asset] { currentDerived().geotagged }
+
     func reloadAssets() {
         assets = (try? database.readAssets()) ?? []
+        invalidateDerived()
         rebuildFallbackImport()
-        // 后台补齐缺失的缩略图 + 清掉失效缓存（旧键留下的孤儿文件）
-        ThumbnailStore.shared.prewarm(assets)
-        ThumbnailStore.shared.prune(keeping: assets)
+        // 缩略图改成「滚到哪生成哪」（见 noteVisible），这里不再整库后台补齐：
+        // 8000 条素材的补齐任务会长时间占着 CPU 和磁盘，反而让用户正看着的那几张更慢。
+        // 只清掉失效缓存（旧键留下的孤儿文件）。回收站里的素材不在 assets 中，
+        // 要一并算进"保留名单"，否则它们的缩略图每次启动都被清掉、进回收站又要重解一遍
+        let keep = assets + ((try? database.readDeletedAssets()) ?? [])
+        ThumbnailStore.shared.prune(keeping: keep)
+    }
+
+    // MARK: - 缩略图按需生成
+
+    private var visibleIDs: Set<Int64> = []
+    private var prewarmTask: Task<Void, Never>?
+
+    /// 卡片滚进可视区时上报一次。真正要生成的缩略图由 cell 自己的 .task 发起（前台优先级），
+    /// 这里只负责"顺手把前后各一屏半也补上"，避免刚滚过去一片空白
+    func noteVisible(_ id: Int64) {
+        visibleIDs.insert(id)
+        prewarmTask?.cancel()
+        prewarmTask = Task { [weak self] in
+            // 滚动停下 0.4s 再动手：快速拖动时不跟着跑
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            self?.prewarmVisibleWindow()
+        }
+    }
+
+    /// 只补当前可视位置附近的素材，不做全库
+    private func prewarmVisibleWindow() {
+        let ids = visibleIDs
+        visibleIDs.removeAll(keepingCapacity: true)
+        let order = currentDerived().order
+        let indices = ids.compactMap { order[$0] }.sorted()
+        guard let first = indices.first, let last = indices.last else { return }
+        let pad = 120
+        let from = max(0, first - pad)
+        let to = min(assets.count, last + pad)
+        guard to > from else { return }
+        ThumbnailStore.shared.prewarm(Array(assets[from..<to]))
     }
 
     // MARK: - 局部更新
@@ -125,6 +238,7 @@ final class AppModel: ObservableObject {
         var a = assets[i]
         mutate(&a)
         assets[i] = a
+        invalidateDerived()
     }
 
     func setRating(id: Int64, rating: Int) {
@@ -147,11 +261,50 @@ final class AppModel: ObservableObject {
     func moveToTrash(id: Int64) {
         try? database.setDeleted(id: id, deleted: true)
         assets.removeAll { $0.id == id }
+        invalidateDerived()
     }
 
     func restore(id: Int64) {
         try? database.setDeleted(id: id, deleted: false)
         reloadAssets()
+    }
+
+    // MARK: - 回收站清理
+
+    /// 彻底清掉一条回收站记录。`deleteFile=true` 时连磁盘上的原文件一起删（不可恢复）
+    func purge(_ asset: Asset, deleteFile: Bool) async {
+        if deleteFile {
+            await Task.detached(priority: .utility) { Self.removeFiles(of: asset) }.value
+        }
+        try? database.delete(ids: [asset.id].compactMap { $0 })
+        ThumbnailStore.shared.invalidate(asset)
+    }
+
+    /// 清空回收站，返回被清掉的记录数。删文件走后台线程，几千条也不会冻住界面
+    @discardableResult
+    func emptyTrash(deleteFiles: Bool) async -> Int {
+        let items = (try? database.readDeletedAssets()) ?? []
+        guard !items.isEmpty else { return 0 }
+        if deleteFiles {
+            await Task.detached(priority: .utility) {
+                for a in items { Self.removeFiles(of: a) }
+            }.value
+        }
+        try? database.delete(ids: items.compactMap(\.id))
+        for a in items { ThumbnailStore.shared.invalidate(a) }
+        return items.count
+    }
+
+    /// 删素材对应的磁盘文件。实况照片抽到缓存目录里的动态视频是派生数据，
+    /// 由缓存配额自己回收，不在这里处理
+    nonisolated private static func removeFiles(of asset: Asset) {
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: asset.filePath)
+        // iPhone 实况是「图片 + 同名 .MOV」两个文件，属于同一个素材，一起删
+        if asset.kind == .livePhoto, let paired = asset.pairedVideoPath,
+           paired != asset.filePath, !paired.contains("/Library/Caches/") {
+            try? fm.removeItem(atPath: paired)
+        }
     }
 
     // MARK: - 移除（只删索引，不动磁盘文件）
@@ -178,22 +331,57 @@ final class AppModel: ObservableObject {
     func duplicateGroups() -> [[Asset]] {
         var buckets: [String: [Asset]] = [:]
         for a in assets {
-            let key = Self.duplicateKey(for: a)
-            buckets[key, default: []].append(a)
+            buckets[Self.coarseKey(for: a), default: []].append(a)
         }
-        return buckets.values
-            .filter { $0.count > 1 }
-            .sorted { ($0.first?.fileName ?? "") < ($1.first?.fileName ?? "") }
+        // 只对粗筛命中的候选组做精筛。照片要读文件头，全库读一遍的话
+        // 8000 张就是 2GB 磁盘 I/O + 主线程卡死
+        var result: [[Asset]] = []
+        for group in buckets.values where group.count > 1 {
+            if group.contains(where: { $0.kind == .photo && $0.durationSeconds <= 0 }) {
+                var fine: [UInt64: [Asset]] = [:]
+                for a in group {
+                    fine[Self.headFingerprint(a.filePath), default: []].append(a)
+                }
+                result.append(contentsOf: fine.values.filter { $0.count > 1 })
+            } else {
+                result.append(group)
+            }
+        }
+        return result.sorted { ($0.first?.fileName ?? "") < ($1.first?.fileName ?? "") }
     }
 
-    /// 重复判据：视频用「大小 + 时长」；照片没有时长，光看大小会把一堆同样大的照片
-    /// 误判成重复，所以照片用「大小 + 尺寸 + 头部 256KB 指纹」
-    private static func duplicateKey(for a: Asset) -> String {
+    /// 只要组数不要分组内容（侧边栏计数用），省掉建数组和排序
+    private static func countDuplicateGroups(_ assets: [Asset]) -> Int {
+        var buckets: [String: Int] = [:]
+        for a in assets {
+            buckets[Self.coarseKey(for: a), default: 0] += 1
+        }
+        var count = 0
+        for (key, n) in buckets where n > 1 {
+            // 照片组还要按文件头细分，可能比粗筛组数更多，也可能更少
+            if key.hasPrefix("p-") {
+                let group = assets.filter { Self.coarseKey(for: $0) == key }
+                var seen = Set<UInt64>()
+                var dupKeys = Set<UInt64>()
+                for a in group {
+                    let fp = Self.headFingerprint(a.filePath)
+                    if !seen.insert(fp).inserted { dupKeys.insert(fp) }
+                }
+                count += dupKeys.count
+            } else {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// 粗筛键：纯内存计算，不碰磁盘。视频看「大小 + 时长」，照片看「大小 + 宽高」
+    private static func coarseKey(for a: Asset) -> String {
         let size = "\(a.fileSize)"
         if a.kind == .video || a.durationSeconds > 0 {
             return "v-\(size)-\(Int((a.durationSeconds * 1000).rounded()))"
         }
-        return "p-\(size)-\(a.width)x\(a.height)-\(headFingerprint(a.filePath))"
+        return "p-\(size)-\(a.width)x\(a.height)"
     }
 
     /// 读文件开头 256KB 算 FNV：两张真重复的照片头必然一致，成本也就一次小读盘
@@ -259,20 +447,53 @@ final class AppModel: ObservableObject {
 
     /// 扫描完成后补地名。CLGeocoder 有请求频率限制，必须串行 + 间隔，
     /// 否则几百个素材一次性并发请求会全部失败，还会把主线程拖住。
+    ///
+    /// 8000 张手机照片几乎张张带 GPS，逐条处理有两个致命点：
+    /// ① 请求数量爆炸；② 每解析完一条就 patch 一次，@Published 一变整个网格 8000 个
+    /// cell 就要重 diff。所以按坐标去重（手机相册往往集中在少数几个地方），
+    /// 并且攒够一批再统一写回内存。
     private func resolveMissingPlaceNames() {
         placeNameTask?.cancel()
         placeNameTask = Task { [weak self] in
             guard let self else { return }
-            for asset in self.assets where asset.placeName == nil {
-                guard let lat = asset.latitude, let lon = asset.longitude, let id = asset.id else { continue }
-                guard !Task.isCancelled else { return }
-                if let name = await GeocodingService.shared.placeName(latitude: lat, longitude: lon) {
-                    try? self.database.setPlaceName(id: id, name: name)
-                    self.patch(id: id) { $0.placeName = name }
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            var byCoord: [String: (lat: Double, lon: Double, ids: [Int64])] = [:]
+            for a in self.assets where a.placeName == nil {
+                guard let id = a.id, let lat = a.latitude, let lon = a.longitude else { continue }
+                // 3 位小数 ≈ 100m，同一个地方的照片合并成一个请求
+                let key = String(format: "%.3f,%.3f", lat, lon)
+                byCoord[key, default: (lat, lon, [])].ids.append(id)
             }
+
+            var pending: [Int64: String] = [:]
+            var resolved = 0
+            for (_, item) in byCoord {
+                guard !Task.isCancelled else { break }
+                guard let name = await GeocodingService.shared.placeName(latitude: item.lat,
+                                                                        longitude: item.lon) else { continue }
+                for id in item.ids {
+                    try? self.database.setPlaceName(id: id, name: name)
+                    pending[id] = name
+                }
+                resolved += 1
+                // 攒一批再写内存，避免每次都触发整库重绘
+                if pending.count >= 200 {
+                    self.flushPlaceNames(pending)
+                    pending.removeAll()
+                }
+                if resolved >= 400 { break }    // 一次别贪多，剩下的下次导入再补
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            self.flushPlaceNames(pending)
         }
+    }
+
+    private func flushPlaceNames(_ map: [Int64: String]) {
+        guard !map.isEmpty else { return }
+        for i in assets.indices {
+            guard let id = assets[i].id, let name = map[id] else { continue }
+            assets[i].placeName = name
+        }
+        invalidateDerived()
     }
 }
 

@@ -17,10 +17,11 @@ struct MainWindowView: View {
         return "将移除 \(path) 下的 \(n) 条索引记录，磁盘上的视频文件不会改动。"
     }
 
-    /// 统一按 id 取最新素材：库重载后详情不会停留在旧副本上
+    /// 统一按 id 取最新素材：库重载后详情不会停留在旧副本上。
+    /// 走 AppModel 的 id 索引而不是线性查找——8000 条时每帧一次 O(n) 很可观
     private var selectedAsset: Asset? {
         guard let id = selectedAssetID else { return nil }
-        return appModel.assets.first { $0.id == id }
+        return appModel.asset(id: id)
     }
 
     /// 顶部路径条跟随当前素材：选中素材时显示它所在目录，否则显示最近导入的文件夹
@@ -37,19 +38,49 @@ struct MainWindowView: View {
         return n > 0 ? n : appModel.assets.count
     }
 
+    /// 地图页要走两列布局：地图本身占满侧边栏之外的全部空间，
+    /// 详情不再常驻右侧，点标记才浮出来。三列布局做不到「全屏」
+    private var isMapMode: Bool {
+        if case .map = section { return true }
+        return false
+    }
+
+    private var sidebar: some View {
+        SidebarView(selection: $section, assets: appModel.assets,
+                    sources: appModel.sourceItems,
+                    lastImportedAt: { appModel.lastImportedAt($0) },
+                    onRemoveSource: { sourceToRemove = $0 },
+                    duplicateCount: appModel.duplicateCount,
+                    albumCounts: appModel.albumCounts,
+                    placeCounts: appModel.places)
+    }
+
     var body: some View {
-        NavigationSplitView {
-            SidebarView(selection: $section, assets: appModel.assets,
-                        sources: appModel.sourceItems,
-                        lastImportedAt: { appModel.lastImportedAt($0) },
-                        onRemoveSource: { sourceToRemove = $0 },
-                        duplicateCount: appModel.duplicateGroups().count)
-        } content: {
-            mainContent
-                .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
-        } detail: {
-            detailContent
-                .navigationSplitViewColumnWidth(min: 320, ideal: 460)
+        Group {
+            if isMapMode {
+                NavigationSplitView {
+                    sidebar
+                } detail: {
+                    mapContent
+                }
+            } else {
+                NavigationSplitView {
+                    sidebar
+                } content: {
+                    mainContent
+                        .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
+                } detail: {
+                    detailContent
+                        .navigationSplitViewColumnWidth(min: 320, ideal: 460)
+                }
+            }
+        }
+        // 切到地图页先清空选中：否则详情浮层会残留上一页看的那一条
+        .onChange(of: section) { _, newValue in
+            if case .map = newValue {
+                selectedAssetID = nil
+                playerController.unload()
+            }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -107,6 +138,60 @@ struct MainWindowView: View {
 
     // MARK: - 主内容区
 
+    // MARK: - 地图页
+
+    /// 全屏地图 + 右侧浮出的详情卡（点标记才出现）
+    private var mapContent: some View {
+        MapView(assets: appModel.geotaggedAssets,
+                version: appModel.assetsVersion,
+                selectedAssetID: $selectedAssetID)
+            .overlay(alignment: .trailing) { mapDetailCard }
+            .animation(.easeOut(duration: 0.18), value: selectedAssetID)
+            .navigationSplitViewColumnWidth(min: 520, ideal: 900, max: 4000)
+    }
+
+    @ViewBuilder
+    private var mapDetailCard: some View {
+        if let asset = selectedAsset {
+            HStack(spacing: 0) {
+                Divider()
+                ZStack(alignment: .topTrailing) {
+                    AssetDetailView(
+                        asset: asset,
+                        controller: playerController,
+                        onRate: { appModel.setRating(id: $0, rating: $1) },
+                        onColor: { appModel.setColorLabel(id: $0, label: $1) },
+                        onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
+                        onGrab: grabFrame,
+                        onDelete: { deleteAsset(asset.id ?? 0) }
+                    )
+                    .onAppear { load(asset) }
+                    .onChange(of: asset.id) { _, _ in
+                        if let a = selectedAsset { load(a) }
+                    }
+                    Button {
+                        selectedAssetID = nil
+                        playerController.unload()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("关闭详情")
+                    .padding(8)
+                }
+                .frame(width: 380)
+                .background(.regularMaterial)
+                .shadow(radius: 8)
+            }
+            .frame(maxHeight: .infinity)
+            .transition(.move(edge: .trailing))
+        }
+    }
+
+    // MARK: - 主内容区
+
     @ViewBuilder
     private var mainContent: some View {
         switch section {
@@ -117,7 +202,7 @@ struct MainWindowView: View {
         case .duplicates:
             DuplicateView()
         case .map:
-            MapView(assets: appModel.assets, selectedAssetID: $selectedAssetID)
+            EmptyView()   // 地图页走两列布局，不会走到这里
         case .smartAlbum(let id):
             if let album = SmartAlbum.find(id: id) {
                 library(album.filter(appModel.assets),
@@ -139,10 +224,12 @@ struct MainWindowView: View {
 
     /// 图库页：网格与时间轴合并在一起，顶部统一显示总数
     private func library(_ assets: [Asset], title: String = "图库", hint: String? = nil) -> some View {
-        LibraryView(title: title, assets: assets, selectedAssetID: $selectedAssetID,
+        LibraryView(title: title, assets: assets, version: appModel.assetsVersion,
+                    selectedAssetID: $selectedAssetID,
                     onRate: { appModel.setRating(id: $0, rating: $1) },
                     onDelete: deleteAsset,
                     onToggleFavorite: { appModel.toggleFavorite(id: $0) },
+                    onVisible: { appModel.noteVisible($0) },
                     emptyHint: hint)
     }
 

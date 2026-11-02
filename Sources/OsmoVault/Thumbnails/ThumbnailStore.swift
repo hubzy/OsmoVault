@@ -18,7 +18,12 @@ final class ThumbnailStore {
     /// 详情页用的大图缓存，单独一份且容量小：整张原图常驻内存会把内存吃穿
     private let largeMemory = NSCache<NSString, NSImage>()
     private var inFlight: [String: Task<NSImage?, Never>] = [:]
-    private let limiter = DecodeLimiter(limit: 3)
+    /// 前台解码（滚动到哪生成到哪）：视频帧最贵，只能开 3 个；图片解码便宜，开 6 个
+    private let videoLimiter = DecodeLimiter(limit: 3)
+    private let imageLimiter = DecodeLimiter(limit: 6)
+    /// 后台补缩略图走独立的闸门，**不跟前台抢** —— 否则整库 8000 张排队，
+    /// 用户滚到的那几张要等前面几千个任务跑完才轮到，网格就一直转圈
+    private let prewarmLimiter = DecodeLimiter(limit: 2)
     private var prewarmTask: Task<Void, Never>?
 
     private init() {
@@ -82,17 +87,29 @@ final class ThumbnailStore {
         let keysAndPaths = assets.map { (Self.cacheKey(for: $0), $0.filePath) }
 
         prewarmTask = Task { [weak self] in
-            // 每批 4 个并发，批间让出主线程，不跟界面抢
-            for chunk in keysAndPaths.chunked(into: 4) {
+            guard let self else { return }
+            // 一次把目录列出来。原来每个素材发一次 detached 去 stat，
+            // 8000 个素材就是 8000 次 Task + 系统调用，光这个就要跑好几秒
+            let existing = await Task.detached(priority: .background) {
+                Set((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            }.value
+            let missing = keysAndPaths.filter { !existing.contains($0.0 + ".jpg") }
+            guard !missing.isEmpty else { return }
+
+            for chunk in missing.chunked(into: 32) {
                 if Task.isCancelled { return }
                 await withTaskGroup(of: Void.self) { group in
                     for (key, path) in chunk {
-                        group.addTask {
-                            let exists = await Task.detached(priority: .background) {
-                                FileManager.default.fileExists(atPath: dir.appendingPathComponent(key + ".jpg").path)
-                            }.value
-                            guard !exists else { return }
-                            _ = await self?.renderOnly(key: key, path: path)
+                        group.addTask { [weak self] in
+                            guard let self else { return }
+                            await self.prewarmLimiter.acquire()
+                            // defer 里不能 await，这里手动释放（render 不 throw，不会漏）
+                            if Task.isCancelled {
+                                await self.prewarmLimiter.release()
+                                return
+                            }
+                            _ = await self.renderOnly(key: key, path: path)
+                            await self.prewarmLimiter.release()
                         }
                     }
                 }
@@ -121,28 +138,30 @@ final class ThumbnailStore {
     /// 只做后台补齐，不占用 inFlight 登记表、也不往内存缓存塞（避免整库图片常驻内存）
     private func renderOnly(key: String, path: String) async -> NSImage? {
         let dest = cacheDir.appendingPathComponent(key + ".jpg")
-        let limiter = self.limiter
-        await limiter.acquire()
-        defer { Task.detached { await limiter.release() } }
         return await Self.render(path: path, to: dest)
     }
 
     private func makeTask(key: String, path: String) -> Task<NSImage?, Never> {
         let dest = cacheDir.appendingPathComponent(key + ".jpg")
-        let limiter = limiter
         let memory = memory
+        let limiter = Self.isImagePath(path) ? imageLimiter : videoLimiter
         return Task<NSImage?, Never> { () -> NSImage? in
             if let disk = await Self.loadFromDisk(dest) {
                 memory.setObject(disk, forKey: key as NSString)
                 return disk
             }
             await limiter.acquire()
-            defer { Task.detached { await limiter.release() } }
-            guard let image = await Self.render(path: path, to: dest) else { return nil }
+            let rendered = await Self.render(path: path, to: dest)
+            await limiter.release()
+            guard let image = rendered else { return nil }
             // 调用方可能已经被取消，这里仍然落内存缓存，下次进来直接命中
             memory.setObject(image, forKey: key as NSString)
             return image
         }
+    }
+
+    private static func isImagePath(_ path: String) -> Bool {
+        MediaScanner.imageExtensions.contains((path as NSString).pathExtension.lowercased())
     }
 
     /// 缓存键必须**跨进程稳定**。
@@ -253,8 +272,9 @@ private actor DecodeLimiter {
             running += 1
             return
         }
+        // 挂起等待。注意名额是 release 直接转交过来的（running 没减），
+        // 恢复时**不能**再 running += 1，否则并发数会一路涨上去，闸门形同虚设
         await withCheckedContinuation { waiters.append($0) }
-        running += 1
     }
 
     func release() {

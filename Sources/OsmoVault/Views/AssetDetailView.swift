@@ -452,7 +452,8 @@ private struct InfoSection: View {
                 infoRow("时间", recordedText)
                 infoRow("地点", locationText)
                 infoRow("规格", specText)
-                if asset.kind != .photo { infoRow("时长", durationText) }
+                // 照片没有时长；实况照片的动态部分没抽取过时也不知道多长，别显示 00:00
+                if asset.kind != .photo, asset.durationSeconds > 0 { infoRow("时长", durationText) }
                 infoRow("大小", sizeText)
                 pathRow("路径", asset.filePath)
                 if asset.srtPath != nil {

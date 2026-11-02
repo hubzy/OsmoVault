@@ -69,10 +69,18 @@ extension Asset {
     var isVideo: Bool { kind == .video }
 
     /// 播放器要用的那条路径：视频本身，或实况照片的动态部分
+    ///
+    /// 安卓/鸿蒙的动态视频是嵌在照片文件里的，扫描阶段**不抽取**（8000 张抽一遍就是 30GB），
+    /// 所以第一次取会做一次提取并落到受配额约束的缓存目录里，之后直接命中。
+    /// 不要在 SwiftUI body 里无脑调用它——有副作用（写缓存文件）。
     var playbackPath: String? {
         switch kind {
         case .video: return filePath
-        case .livePhoto: return pairedVideoPath ?? filePath
+        case .livePhoto:
+            // 必须确认文件还在：缓存配额会按 LRU 删掉旧抽取结果，
+            // 老记录里存的路径可能已经不存在了，直接返回会让播放器静默失败
+            if let p = pairedVideoPath, FileManager.default.fileExists(atPath: p) { return p }
+            return MotionPhoto.extract(from: URL(fileURLWithPath: filePath))?.path
         case .photo: return nil
         }
     }

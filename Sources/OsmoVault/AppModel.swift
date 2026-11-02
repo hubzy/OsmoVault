@@ -12,6 +12,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var scanRoots: [String] = []
     /// 导入历史（持久化）：最近一次在前，重启后「最近导入」仍在
     @Published private(set) var importHistory: [ImportRecord] = []
+    /// 「截取实况图」的结果提示，由 MainWindowView 显示
+    @Published var grabStatus: String?
 
     let database: AppDatabase
     private var placeNameTask: Task<Void, Never>?
@@ -342,6 +344,31 @@ final class AppModel: ObservableObject {
     func restore(id: Int64) {
         try? database.setDeleted(id: id, deleted: false)
         reloadAssets()
+    }
+
+    // MARK: - 截取实况图
+
+    /// 把「截取实况图」产出的「静帧 + 短视频」注册成一条实况照片素材入库。
+    /// 静帧与被截视频同名（IMG_xxx.jpg + IMG_xxx.mp4），扫描期的配对逻辑会把它识别成
+    /// 实况照片，这里再显式锁成 livePhoto + pairedVideoPath，确保悬停能播放那段动态。
+    func importLivePhoto(photoPath: String, videoPath: String) async {
+        let url = URL(fileURLWithPath: photoPath)
+        guard let built = await MediaScanner.buildAsset(url: url) else { return }
+        var live = built
+        live.mediaType = MediaKind.livePhoto.rawValue
+        live.pairedVideoPath = videoPath
+        do { try database.save(&live) } catch { return }
+        reloadAssets()
+    }
+
+    /// 设置「截取实况图」的提示，并在几秒后自动清除（避免遮挡界面）
+    func reportGrab(_ message: String) {
+        grabStatus = message
+        let token = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if grabStatus == token { grabStatus = nil }
+        }
     }
 
     // MARK: - 回收站清理

@@ -6,7 +6,6 @@ struct MainWindowView: View {
     @State private var showImporter = false
     @State private var selectedAssetID: Int64?
     @State private var section: SidebarItem? = .library
-    @State private var grabStatus: String?
     @State private var playerController = PlayerController()
     /// 侧边栏右键来源后待确认移除的文件夹
     @State private var sourceToRemove: String?
@@ -155,7 +154,7 @@ struct MainWindowView: View {
                                   },
                                   onDismiss: { appModel.dismissScanStatus() })
                 }
-                if let msg = grabStatus {
+                if let msg = appModel.grabStatus {
                     Text(msg)
                         .padding(10)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -350,21 +349,27 @@ struct MainWindowView: View {
         guard let asset = selectedAsset else { return }
         // 照片本身就是图，实况照片取其动态部分的当前帧
         guard let sourcePath = asset.playbackPath else {
-            grabStatus = "照片无需截取"
+            appModel.reportGrab("照片无需截取")
             return
         }
         var target = asset
         target.filePath = sourcePath
         let seconds = playerController.currentTime
-        do {
-            let url = try FrameGrabService.grab(asset: target, at: seconds)
-            grabStatus = "已保存实况图：\(url.lastPathComponent)"
-        } catch {
-            grabStatus = "截取失败：\(error.localizedDescription)"
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            grabStatus = nil
+        appModel.reportGrab("正在截取实况图…")
+        // 取帧 + 导短视频可能要一两秒，放到后台跑，别卡住界面
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let (photoURL, videoURL) = try FrameGrabService.grabLivePhoto(asset: target, at: seconds)
+                // 入库（注册成实况照片）是异步的，丢到 Task 里跑
+                Task { await appModel.importLivePhoto(photoPath: photoURL.path, videoPath: videoURL.path) }
+                DispatchQueue.main.async {
+                    appModel.reportGrab("已截取实况图：\(photoURL.lastPathComponent)（含动态，可在「实况照片」找到）")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    appModel.reportGrab("截取失败：\(error.localizedDescription)")
+                }
+            }
         }
     }
 }

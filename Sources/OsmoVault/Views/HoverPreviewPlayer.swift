@@ -24,7 +24,10 @@ final class HoverPreviewNSView: NSView {
         item.preferredForwardBufferDuration = 0.5
 
         let p = AVPlayer(playerItem: item)
+        // 卡片 hover 的预览必须完全无声：只设 volume=0 在个别素材上还是会漏出声音，
+        // isMuted 是真正把音频关掉的那道闸
         p.volume = 0
+        p.isMuted = true
         // hover 预览要的是立刻出画面，别为了防卡顿而憋着不播
         p.automaticallyWaitsToMinimizeStalling = false
         player = p

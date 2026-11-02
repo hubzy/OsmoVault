@@ -25,6 +25,9 @@ struct LibraryView: View {
         "\(version)|\(assets.count)|\(assets.first?.id ?? -1)"
     }
 
+    /// 滚动位置的记忆键：图库 / 各相册 / 各来源各记一份，互不干扰
+    private var scrollAnchorKey: String { "timeline.scroll.\(title)" }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -121,6 +124,7 @@ struct LibraryView: View {
             .frame(maxWidth: .infinity)
         } else {
             TimelineScroller(months: months, undated: noDate,
+                             anchorKey: scrollAnchorKey,
                              selectedAssetID: $selectedAssetID,
                              onRate: onRate, onDelete: onDelete,
                              onToggleFavorite: onToggleFavorite,
@@ -219,6 +223,9 @@ private struct TimelineMonth: Identifiable {
 private struct TimelineScroller: View {
     let months: [TimelineMonth]
     let undated: [Asset]
+    /// 滚动位置的记忆键。窗口宽度一变，按像素记的偏移就对不上了，
+    /// 所以记的是**月份 id（日期）**而不是偏移量
+    let anchorKey: String
     @Binding var selectedAssetID: Int64?
     var onRate: (Int64, Int) -> Void
     var onDelete: ((Int64) -> Void)?
@@ -229,6 +236,9 @@ private struct TimelineScroller: View {
     @State private var scrolledMonthID: String?
     /// 实际用于高亮的月份，只接受非 nil，避免滚动时高亮闪烁
     @State private var activeMonthID: String?
+    /// 已经为哪个 anchorKey 恢复过位置。切到别的集合时 anchorKey 变了，要重新恢复
+    @State private var restoredKey = ""
+    @State private var saveTask: Task<Void, Never>?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -298,6 +308,40 @@ private struct TimelineScroller: View {
                     if let newID { activeMonthID = newID }
                 }
             }
+            // 分组是外层算完才给过来的，可能比本视图晚一帧，所以几处都试。
+            // anchorKey 变化（切到别的集合）也要重新恢复一次
+            .onAppear { restore(proxy) }
+            .onChange(of: anchorKey, initial: true) { _, _ in restore(proxy) }
+            .onChange(of: months.count) { _, _ in restore(proxy) }
+        }
+        .onChange(of: activeMonthID) { _, newID in saveAnchor(newID) }
+    }
+
+    // MARK: - 滚动位置记忆
+
+    /// 回到上次看到的月份。以月份（日期）为锚点，宽度变化也不会错位
+    private func restore(_ proxy: ScrollViewProxy) {
+        guard !months.isEmpty, restoredKey != anchorKey else { return }
+        restoredKey = anchorKey
+        guard let saved = UserDefaults.standard.string(forKey: anchorKey),
+              months.contains(where: { $0.id == saved }) else { return }
+        scrolledMonthID = saved
+        activeMonthID = saved
+        jump(proxy, to: saved)
+    }
+
+    /// 滚动停下来才落盘，免得快速拖动时狂写 UserDefaults
+    private func saveAnchor(_ id: String?) {
+        saveTask?.cancel()
+        let key = anchorKey
+        saveTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            if let id {
+                UserDefaults.standard.set(id, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
         }
     }
 
@@ -314,20 +358,26 @@ private struct TimelineScroller: View {
         let peak = Double(months.map(\.count).max() ?? 1)
         return ScrollViewReader { rulerProxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .bottom, spacing: 3) {
-                    ForEach(Array(months.enumerated()), id: \.element.id) { index, month in
-                        // 年份变化处插一个年份标记，月份自己永远标 "N月"，
-                        // 这样 1 月不会被年份标签顶掉（之前 1 月显示成 "2026"，看起来像统计漏了）
-                        if index == 0 || months[index - 1].year != month.year {
-                            yearMarker(month.year, isFirst: index == 0)
+                // 零尺寸的桥接视图：把滚轮的垂直分量转成刻度尺的左右平移
+                ZStack(alignment: .bottom) {
+                    RulerWheelBridge().frame(width: 0, height: 0)
+                    HStack(alignment: .bottom, spacing: 3) {
+                        ForEach(Array(months.enumerated()), id: \.element.id) { index, month in
+                            // 跨年份只插一条细分隔线作方位参考。年份不再占一个刻度位，
+                            // 否则 1 月会被年份标签顶掉（之前 1 月显示成 "2026"，看着像统计漏了）
+                            if index > 0, months[index - 1].year != month.year {
+                                yearDivider
+                            }
+                            monthTick(month: month, peak: peak) { onPick(month.id) }
                         }
-                        monthTick(month: month, peak: peak) { onPick(month.id) }
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
             }
-            .frame(height: 56)
+            .frame(height: 58)
+            // 年份浮在刻度尺左上角，跟随当前所处的月份，不挤占月份标签的位置
+            .overlay(alignment: .topLeading) { yearBadge }
             // 手动滚动列表时，刻度尺上的当前月也要跟着滚进可视范围
             .onChange(of: activeMonthID) { _, newID in
                 guard let newID else { return }
@@ -338,13 +388,46 @@ private struct TimelineScroller: View {
         }
     }
 
+    /// 左上角年份：显示当前所处月份所属的年份
+    @ViewBuilder
+    private var yearBadge: some View {
+        if let year = currentYear {
+            HStack(spacing: 3) {
+                Image(systemName: "calendar").font(.system(size: 9))
+                Text("\(year)")
+                    .font(.caption2)
+                    .bold()
+                    .monospacedDigit()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(.background.opacity(0.9)))
+            .padding(.leading, 12)
+            .padding(.top, 3)
+        }
+    }
+
+    private var currentYear: Int? {
+        if let id = activeMonthID, let m = months.first(where: { $0.id == id }) { return m.year }
+        return months.first?.year
+    }
+
+    /// 跨年份的分隔线：只是一条细线，不占月份刻度位
+    private var yearDivider: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.35))
+            .frame(width: 1, height: 26)
+            .padding(.horizontal, 3)
+    }
+
     /// 刻度尺上的月份柱：高度 = 该月素材数占比，标签固定 "N月"
     private func monthTick(month: TimelineMonth, peak: Double, onTap: @escaping () -> Void) -> some View {
         Button(action: onTap) {
             VStack(spacing: 3) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(month.id == activeMonthID ? Color.accentColor : Color.accentColor.opacity(0.28))
-                    .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 28))
+                    .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 24))
                 Text("\(month.month)月")
                     .font(.caption2)
                     .lineLimit(1)
@@ -356,23 +439,6 @@ private struct TimelineScroller: View {
         .buttonStyle(.plain)
         .help("\(month.title) · \(month.count) 个素材")
         .id(Self.rulerID(month.id))
-    }
-
-    /// 年份标记：与该年首月之间用一条细分隔线隔开
-    private func yearMarker(_ year: Int, isFirst: Bool) -> some View {
-        HStack(alignment: .bottom, spacing: 4) {
-            if !isFirst {
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.3))
-                    .frame(width: 1)
-                    .frame(maxHeight: .infinity)
-            }
-            Text("\(year)")
-                .font(.caption2)
-                .bold()
-                .foregroundStyle(.secondary)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-        }
     }
 
     /// 刻度尺里的 id 单独加前缀，避免和列表里的月份 id 撞车

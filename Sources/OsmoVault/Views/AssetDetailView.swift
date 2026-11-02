@@ -234,20 +234,82 @@ private struct PhotoStage: View {
     }
 }
 
-/// 实况照片：底图是静态图，播放时在上面叠播放器
+/// 实况照片：底图是静态图，播放时在下面叠播放器。
+///
+/// 交互照系统照片应用的规范来：
+/// - 画面**左上角**常驻 LIVE 标记，点它可以把实况关掉（变成带斜杠的图标，静止图）
+/// - 鼠标悬停自动播放动态片段，移开停回静态图；点画面也能手动播/停
 private struct LivePhotoStage: View {
     let asset: Asset
     let controller: PlayerController
     let fallbackRatio: CGFloat
     @Binding var playing: Bool
 
+    /// 实况开关。关掉后就是一张普通静态图，hover 也不播
+    @State private var liveEnabled = true
+
+    private var ratio: CGFloat {
+        let w = CGFloat(asset.width), h = CGFloat(asset.height)
+        guard w > 0, h > 0 else { return 4.0 / 3.0 }
+        return w / h
+    }
+
     var body: some View {
-        ZStack {
-            PhotoStage(asset: asset)
-            if playing {
-                PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+        GeometryReader { geo in
+            // 按素材比例算出画面框：LIVE 标记要贴在**图片**的左上角，
+            // 而不是整个舞台（舞台比图片宽/高时贴边会跑到信箱区里）
+            let fitted = Self.fit(in: geo.size, ratio: ratio)
+            ZStack(alignment: .topLeading) {
+                PhotoStage(asset: asset)
+                if playing {
+                    PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+                }
+                LiveBadge(enabled: liveEnabled, playing: playing) { toggleLive() }
+                    .padding(8)
+            }
+            .frame(width: fitted.width, height: fitted.height)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            guard liveEnabled else { return }
+            if hovering {
+                start()
+            } else if playing {
+                stop()
             }
         }
+        .onTapGesture {
+            guard liveEnabled else { return }
+            if playing { stop() } else { start() }
+        }
+        .onChange(of: asset.id) { _, _ in liveEnabled = true }
+        .onDisappear { stop() }
+    }
+
+    private func toggleLive() {
+        liveEnabled.toggle()
+        if !liveEnabled { stop() }
+    }
+
+    private func start() {
+        guard !playing else { return }
+        playing = true
+        // 声音按「实况开关」来，别被之前播过的视频带成有声
+        controller.syncLiveAudio()
+        controller.playFromStart()
+    }
+
+    private func stop() {
+        guard playing else { return }
+        playing = false
+        controller.pause()
+    }
+
+    private static func fit(in size: CGSize, ratio: CGFloat) -> CGSize {
+        guard size.width > 1, size.height > 1, ratio > 0 else { return .zero }
+        let width = min(size.width, size.height * ratio)
+        return CGSize(width: width, height: width / ratio)
     }
 }
 
@@ -280,13 +342,14 @@ private struct LivePhotoBar: View {
 
             Spacer(minLength: 0)
 
+            // 实况照片默认无声：悬停自动播时不该突然出声，需要声音才手动开
             Button {
-                controller.toggleMute()
+                controller.setLiveAudio(!controller.liveAudioEnabled)
             } label: {
-                Image(systemName: controller.volumeIcon)
+                Image(systemName: controller.liveAudioEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
             }
             .buttonStyle(.borderless)
-            .help(controller.isMuted ? "取消静音" : "静音")
+            .help(controller.liveAudioEnabled ? "关闭实况声音" : "开启实况声音")
             .frame(width: 26)
         }
         // 离开这张素材时停掉，避免下一条素材继续在后台播

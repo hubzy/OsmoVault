@@ -276,7 +276,10 @@ struct MainWindowView: View {
             playerController.unload()
             return
         }
-        playerController.load(url: URL(fileURLWithPath: path))
+        // 视频选中即播；实况照片只预载，等鼠标悬停画面才播（且默认静音）
+        playerController.load(url: URL(fileURLWithPath: path),
+                              autoplay: asset.kind != .livePhoto,
+                              livePhoto: asset.kind == .livePhoto)
     }
 
     // MARK: - 操作

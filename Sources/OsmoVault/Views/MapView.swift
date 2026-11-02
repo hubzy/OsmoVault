@@ -77,31 +77,84 @@ struct MapView: View {
         }
     }
 
+    /// 视野里的聚合点不多时才用缩略图卡片：一张 400px 缩略图解开就是 640KB，
+    /// 几百个全铺开会吃掉几百 MB 内存。点多了自动退化成彩色圆点
+    private static let detailedClusterLimit = 60
+
     private func pinView(_ cluster: Cluster) -> some View {
         let isSelected = cluster.asset.id == selectedAssetID
-        return ZStack {
-            if cluster.count == 1 {
-                Image(systemName: cluster.systemImage)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(cluster.tint))
+        let detailed = clusters.count <= Self.detailedClusterLimit
+        let size: CGFloat = isSelected ? 54 : 44
+
+        return ZStack(alignment: .bottomTrailing) {
+            if detailed {
+                VStack(spacing: 0) {
+                    ZStack {
+                        // 聚合点垫一层白卡在后面，做出"一叠照片"的效果
+                        if cluster.count > 1 {
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(Color.white.opacity(0.9))
+                                .frame(width: size - 8, height: size - 8)
+                                .offset(x: 5, y: 5)
+                                .shadow(radius: 1)
+                        }
+                        AsyncThumbView(asset: cluster.asset)
+                            .frame(width: size, height: size)
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .stroke(isSelected ? Color.accentColor : Color.white,
+                                            lineWidth: isSelected ? 3 : 2)
+                            )
+                            .shadow(radius: 2)
+                    }
+                    // 指向真实坐标点的小尖角
+                    Image(systemName: "arrowtriangle.down.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.white)
+                        .offset(y: -4)
+                        .shadow(radius: 1)
+                }
             } else {
+                ZStack {
+                    if cluster.count == 1 {
+                        Image(systemName: cluster.systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                    } else {
+                        Text("\(cluster.count)")
+                            .font(.caption2).bold().monospacedDigit()
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: isSelected ? 30 : 24, height: isSelected ? 30 : 24)
+                .background(Circle().fill(cluster.tint))
+                .overlay(
+                    Circle().stroke(isSelected ? Color.accentColor : Color.white.opacity(0.9),
+                                    lineWidth: isSelected ? 2.5 : 1.5)
+                )
+                .shadow(radius: 1)
+            }
+
+            // 多素材的聚合点右下角标数量
+            if cluster.count > 1 {
                 Text("\(cluster.count)")
                     .font(.caption2).bold().monospacedDigit()
                     .foregroundStyle(.white)
-                    .frame(minWidth: 24, minHeight: 24)
-                    .background(Circle().fill(cluster.tint))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.black.opacity(0.7)))
+                    .offset(x: 4, y: 3)
             }
         }
-        .overlay {
-            Circle()
-                .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.85), lineWidth: isSelected ? 2.5 : 1)
-                .frame(width: isSelected ? 30 : 26, height: isSelected ? 30 : 26)
+        // 实况照片按规范在左上角标 LIVE
+        .overlay(alignment: .topLeading) {
+            if detailed && cluster.asset.kind == .livePhoto {
+                LiveBadge(compact: true)
+                    .offset(x: -4, y: -4)
+            }
         }
-        .scaleEffect(isSelected ? 1.2 : 1.0)
-        .shadow(radius: 1)
-        .contentShape(Circle())
+        .scaleEffect(isSelected ? 1.12 : 1.0)
+        .contentShape(Rectangle())
     }
 
     // MARK: - 聚类

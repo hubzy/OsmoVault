@@ -15,17 +15,21 @@ final class PlayerController: ObservableObject {
     @Published var isMuted = false
     @Published var playbackRate: Float = 1
     @Published var loopEnabled = true
+    /// 实况照片的声音开关，全局记住。默认关：选中/悬停自动播时不该突然出声
+    @Published var liveAudioEnabled: Bool = UserDefaults.standard.bool(forKey: PlayerController.liveAudioKey)
 
     /// 拖动进度条时暂停时间回调回写，避免滑块跟手打架
     var isScrubbing = false
 
     static let rateOptions: [Float] = [0.25, 0.5, 1, 1.5, 2]
+    private static let liveAudioKey = "liveAudioEnabled"
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
     private var sizeObservation: NSKeyValueObservation?
     private var loadedPath: String?
+    private var loadedIsLivePhoto = false
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -47,6 +51,7 @@ final class PlayerController: ObservableObject {
         teardownItemObservers()
         pause()
         loadedPath = nil
+        loadedIsLivePhoto = false
         isReady = false
         duration = 0
         currentTime = 0
@@ -54,9 +59,14 @@ final class PlayerController: ObservableObject {
         player.replaceCurrentItem(with: nil)
     }
 
-    func load(url: URL) {
-        guard loadedPath != url.path else { return }
+    /// - Parameters:
+    ///   - autoplay: 加载就绪后是否自动起播。视频选中即播；**实况照片要等鼠标悬停**，
+    ///     所以传 false —— 否则点一下就出声，等于"还没看就播了"
+    ///   - livePhoto: 实况照片默认静音（声音开关由 `liveAudioEnabled` 控制）
+    func load(url: URL, autoplay: Bool = true, livePhoto: Bool = false) {
+        guard loadedPath != url.path || livePhoto != loadedIsLivePhoto else { return }
         loadedPath = url.path
+        loadedIsLivePhoto = livePhoto
 
         teardownItemObservers()
         sizeObservation?.invalidate()
@@ -65,6 +75,7 @@ final class PlayerController: ObservableObject {
         duration = 0
         currentTime = 0
         videoRatio = nil
+        player.isMuted = livePhoto ? !liveAudioEnabled : isMuted
 
         let item = AVPlayerItem(url: url)
         // 本地文件不需要攒大缓冲：1s 足够，起播更快、内存占用更低
@@ -95,6 +106,8 @@ final class PlayerController: ObservableObject {
                         self.videoRatio = size.width / size.height
                     }
                     self.isReady = true
+                    // 实况照片只是"预载"，等悬停/点击才真的播
+                    guard autoplay else { self.isPlaying = false; return }
                     self.player.rate = self.playbackRate
                     self.isPlaying = true
                 case .failed:
@@ -185,6 +198,24 @@ final class PlayerController: ObservableObject {
         isMuted.toggle()
         player.isMuted = isMuted
         if !isMuted, volumeLevel == 0 {
+            volumeLevel = 0.6
+            player.volume = 0.6
+        }
+    }
+
+    /// 起播前把实际静音状态对齐到「实况开关」：中间可能播过视频、改过全局静音
+    func syncLiveAudio() {
+        player.isMuted = !liveAudioEnabled
+        isMuted = !liveAudioEnabled
+    }
+
+    /// 实况照片的声音开关。默认关（悬停自动播不该出声），开过一次就全局记住
+    func setLiveAudio(_ enabled: Bool) {
+        liveAudioEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.liveAudioKey)
+        player.isMuted = !enabled
+        isMuted = !enabled
+        if enabled, volumeLevel == 0 {
             volumeLevel = 0.6
             player.volume = 0.6
         }

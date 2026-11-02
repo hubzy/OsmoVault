@@ -206,7 +206,11 @@ struct AssetCell: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if isHovered && previewOn {
+            // 实况照片按规范在左上角标 LIVE；非实况才在悬停起播时显示播放指示
+            if asset.kind == .livePhoto {
+                LiveBadge(compact: true)
+                    .padding(5)
+            } else if isHovered && previewOn {
                 Image(systemName: "play.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.white)

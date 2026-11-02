@@ -264,7 +264,8 @@ struct MainWindowView: View {
             if let album = SmartAlbum.find(id: id) {
                 library(album.filter(appModel.assets),
                         title: album.name,
-                        hint: "「\(album.name)」里还没有素材")
+                        hint: "「\(album.name)」里还没有素材",
+                        isLocationPage: id == "noGPS")
             } else {
                 placeholder("相册不存在")
             }
@@ -280,14 +281,17 @@ struct MainWindowView: View {
     }
 
     /// 图库页：网格与时间轴合并在一起，顶部统一显示总数
-    private func library(_ assets: [Asset], title: String = "图库", hint: String? = nil) -> some View {
+    private func library(_ assets: [Asset], title: String = "图库",
+                         hint: String? = nil, isLocationPage: Bool = false) -> some View {
         LibraryView(title: title, assets: assets, version: appModel.assetsVersion,
                     selectedAssetID: $selectedAssetID,
                     onRate: { appModel.setRating(id: $0, rating: $1) },
                     onDelete: deleteAsset,
                     onToggleFavorite: { appModel.toggleFavorite(id: $0) },
                     onVisible: { appModel.noteVisible($0) },
-                    onAssignLocation: { locationTarget = .batch($0) },
+                    isLocationPage: isLocationPage,
+                    // 只在「补定位」页挂这个入口，其他页面不再冒出「补定位 N」按钮
+                    onAssignLocation: isLocationPage ? { locationTarget = .batch($0) } : nil,
                     emptyHint: hint)
     }
 

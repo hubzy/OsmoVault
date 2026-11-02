@@ -104,7 +104,7 @@ struct LocationEditorSheet: View {
             Text(target.isBatch ? "批量补定位" : "补定位")
                 .font(.headline)
             Text(target.isBatch
-                 ? "给这 \(target.assets.count) 个素材标上同一个位置"
+                 ? "只给勾选的 \(target.assets.count) 个素材标上同一个位置"
                  : target.assets.first?.fileName ?? "")
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -43,6 +43,11 @@ struct LibraryView: View {
             content
         }
         .onChange(of: cacheKey, initial: true) { _, _ in recompute() }
+        // 切到别的集合时清掉多选，避免勾选状态被 SwiftUI 复用带到其他页面
+        .onChange(of: title) { _, _ in
+            selectionMode = false
+            checkedIDs.removeAll()
+        }
     }
 
     private func recompute() {
@@ -194,7 +199,7 @@ struct LibraryView: View {
                              onRate: onRate, onDelete: onDelete,
                              onToggleFavorite: onToggleFavorite,
                              onVisible: onVisible,
-                             selectionMode: selectionMode,
+                             selectionMode: isLocationPage && selectionMode,
                              checkedIDs: checkedIDs,
                              onToggleCheck: toggleCheck)
         }

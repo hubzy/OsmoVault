@@ -104,7 +104,14 @@ struct AsyncThumbView: View {
             .clipped()
             .task(id: asset.id) {
                 guard loadedID != asset.id else { return }
-                thumb = nil
+                // 先用已生成好的缓存顶上（不触发解码）：地图聚合点缩放后重建视图时，
+                // 不会闪一下灰块再弹回图片——那就是用户看到的"标签抖动"
+                let cached = ThumbnailStore.shared.cachedThumbnail(for: asset)
+                thumb = cached
+                if cached != nil {
+                    loadedID = asset.id
+                    return
+                }
                 let loaded = await ThumbnailStore.shared.thumbnail(for: asset)
                 guard !Task.isCancelled else { return }
                 loadedID = asset.id
@@ -130,6 +137,8 @@ struct AssetCell: View {
     /// 缩略图属于哪条素材。LazyVStack 会复用 cell，切换筛选后可能拿另一条素材
     /// 填到同一个位置上，只判 `thumb == nil` 会一直显示上一条的图
     @State private var loadedID: Int64?
+    /// 正在取图的请求：cell 滚走/复用后要能取消，避免解出来的图贴到别的素材上
+    @State private var thumbTask: Task<Void, Never>?
 
     /// 媒体区统一高度：横竖屏在同一行内等高显示，竖屏按比例变窄
     private var mediaHeight: CGFloat { 150 }
@@ -253,14 +262,30 @@ struct AssetCell: View {
                     .padding(6)
             }
         }
+        // cell 被复用到另一条素材时先清掉旧图，等它真的出现在屏幕上再去取
         .task(id: asset.id) {
-            guard loadedID != asset.id else { return }
             thumb = nil
+            loadedID = nil
             previewOn = false
             hoverTask?.cancel()
-            let loaded = await ThumbnailStore.shared.thumbnail(for: asset)
+        }
+        // 懒加载的关键：`LazyVGrid` 会在可视区上下各预实例化好几屏 cell，
+        // 以前在 `.task` 里直接解码，等于每次启动/滚动都白解几十上百张看不到的图。
+        // 这里按"是否真的滚进可视区"来触发，滚出去的 cell 不再发请求。
+        .onScrollVisibilityChange(threshold: 0.01) { visible in
+            if visible { loadThumbIfNeeded() }
+        }
+    }
+
+    /// 取缩略图（内存 → 磁盘 → 现解码）。已经拿过同一张就直接返回
+    private func loadThumbIfNeeded() {
+        guard loadedID != asset.id else { return }
+        let target = asset
+        thumbTask?.cancel()
+        thumbTask = Task { @MainActor in
+            let loaded = await ThumbnailStore.shared.thumbnail(for: target)
             guard !Task.isCancelled else { return }
-            loadedID = asset.id
+            loadedID = target.id
             thumb = loaded
         }
     }

@@ -131,6 +131,11 @@ struct AssetDetailView: View {
         .onChange(of: asset.id) { _, _ in
             livePlaying = false
         }
+        // 详情面板被移出视图层级（切到地图 / 回收站 / 一键出片 / 重复素材，或关窗口）时
+        // 必须把播放器停住：AVPlayer 不属于视图，视图没了声音照样会放下去。
+        // 用 pause 而不是 unload：回来时 .onAppear 的 load() 会因为路径相同直接返回，
+        // 于是停在暂停状态，不会一回到图库就又开始播
+        .onDisappear { controller.pause() }
     }
 }
 

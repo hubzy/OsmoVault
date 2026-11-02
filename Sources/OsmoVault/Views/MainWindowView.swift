@@ -12,10 +12,7 @@ struct MainWindowView: View {
     @State private var sourceToRemove: String?
     /// 手动补定位（单个 / 批量）
     @State private var locationTarget: LocationEditTarget?
-    /// 地图页右侧详情列宽度，拖动后记住，下次打开不用重新拖
-    @AppStorage("mapDetailWidth") private var mapDetailWidth: Double = 380
-    /// 图库页缩略图列宽度。拖过一次就记下来，窗口宽度怎么变都以这个为准
-    @AppStorage("libraryColumnWidth") private var libraryColumnWidth: Double = 620
+    // 两列宽度在 ResizableSplit 内部用 @AppStorage 管理，这里不再持有
 
     private var removeMessage: String {
         guard let path = sourceToRemove else { return "" }
@@ -52,8 +49,10 @@ struct MainWindowView: View {
     }
 
     /// 回收站 / 一键出片 / 重复素材是自成一体的一整页，右侧不再挂详情列
-    private var showsDetailPane: Bool {
-        switch section {
+    private var showsDetailPane: Bool { showsDetailPane(section) }
+
+    private func showsDetailPane(_ item: SidebarItem?) -> Bool {
+        switch item {
         case .trash, .quickCut, .duplicates: return false
         default: return true
         }
@@ -86,11 +85,16 @@ struct MainWindowView: View {
                 }
             }
         }
-        // 切到地图页先清空选中：否则详情浮层会残留上一页看的那一条
+        // 换页面时先把声音收掉：详情面板可能已经整体不在了（地图 / 回收站 / 一键出片 / 重复素材）。
+        // AVPlayer 独立于视图，光靠视图消失并不会停；这里再兜一道，切页必定静音
         .onChange(of: section) { _, newValue in
             if case .map = newValue {
+                // 地图走另一套布局，详情整块消失：清空选中，回来不残留旧详情
                 selectedAssetID = nil
                 playerController.unload()
+            } else {
+                // 其余页面（含同列换集合）一律停播，避免"人已经走了声音还在"
+                playerController.pause()
             }
         }
         .toolbar {
@@ -167,45 +171,34 @@ struct MainWindowView: View {
 
     /// 地图占左侧，详情是右侧一**列**（和图库一样，不是浮窗），
     /// 中间的分割条可以拖，宽度记在 UserDefaults 里。没选中素材时地图占满整列
+    ///
+    /// `trailingVisible` 只控制"有没有详情列"，不改变 MapView 的位置：
+    /// 否则选中/取消选中时 MapView 会被重建，地图镜头跟着回弹
     private var mapContent: some View {
-        HStack(spacing: 0) {
-            MapView(assets: appModel.geotaggedAssets,
-                    version: appModel.assetsVersion,
-                    selectedAssetID: $selectedAssetID)
-                .frame(minWidth: 320)
-
-            if selectedAsset != nil {
-                // 详情在右：向右拖 → 详情变窄，所以方向取 -1
-                ResizeHandle(width: $mapDetailWidth, range: 300...760, direction: -1)
-                mapDetailColumn
-            }
-        }
-        .navigationSplitViewColumnWidth(min: 520, ideal: 900, max: 4000)
+        // 详情列最宽可拖到分割区域的一半；range 上限给大些，实际由 maxFraction 收口
+        ResizableSplit(key: "mapDetailWidth", defaultValue: 380,
+                       range: 300...4000, side: .trailing, minOther: 320,
+                       maxFraction: 0.5,
+                       trailingVisible: selectedAsset != nil,
+                       leading: {
+                           MapView(assets: appModel.geotaggedAssets,
+                                   version: appModel.assetsVersion,
+                                   selectedAssetID: $selectedAssetID)
+                       },
+                       trailing: { mapDetailColumn })
+            .navigationSplitViewColumnWidth(min: 520, ideal: 900, max: 4000)
     }
 
     /// 缩略图列 + 详情列。
     ///
     /// 这里用自己画的分割条，而不是 NavigationSplitView 的第三列：三列的宽度
     /// 只能给 min/ideal/max，拿不到拖动后的实际值也没法绑定，拖完下次启动又回去了。
-    /// 自己画之后宽度直接写进 @AppStorage，拖一次永久生效
     private var libraryAndDetail: some View {
-        GeometryReader { geo in
-            HStack(spacing: 0) {
-                if showsDetailPane {
-                    mainContent.frame(width: contentWidth(in: geo.size.width))
-                    ResizeHandle(width: $libraryColumnWidth, range: 360...1100, direction: 1)
-                    detailContent.frame(minWidth: 300, maxWidth: .infinity)
-                } else {
-                    mainContent.frame(maxWidth: .infinity)
-                }
-            }
-        }
-    }
-
-    /// 记住的宽度优先，但窗口太窄时让详情列保住 300 的下限，避免两列挤出可视区
-    private func contentWidth(in total: CGFloat) -> CGFloat {
-        let room = max(360, total - 9 - 300)
-        return min(CGFloat(libraryColumnWidth), room)
+        ResizableSplit(key: "libraryColumnWidth", defaultValue: 620,
+                       range: 360...1100, side: .leading, minOther: 300,
+                       trailingVisible: showsDetailPane,
+                       leading: { mainContent },
+                       trailing: { detailContent })
     }
 
     @ViewBuilder
@@ -242,7 +235,6 @@ struct MainWindowView: View {
                     .padding(8)
                 }
             }
-            .frame(width: mapDetailWidth)
             .background(.background)
         }
     }
@@ -431,25 +423,112 @@ struct ScanStatusBar: View {
     }
 }
 
-/// 可拖动的分割条。宽度直接写回绑定的 @AppStorage（拖完即落盘），
-/// 下次启动自动恢复，不用每次重拖
-private struct ResizeHandle: View {
-    @Binding var width: Double
-    var range: ClosedRange<Double>
-    /// +1：向右拖 = 被控列变宽（列在分割条左边）；-1：列在右边，方向相反
-    var direction: Double = 1
+/// 左右两栏 + 可拖动分割条。宽度记在 UserDefaults 里，下次启动自动恢复。
+///
+/// 之前"不好拖、不丝滑"的三个原因，这里逐个处理：
+/// 1. **必须用 `.global` 坐标空间**。`DragGesture` 默认是 `.local`，也就是以被拖视图自身
+///    为原点；而拖动时这一列本身在移动，位移会被视图的移动"吃掉"，表现就是分隔条追不上
+///    鼠标、走走停停。
+/// 2. **拖动中的宽度只放本地 `@State`，松手才写 UserDefaults**。每帧写 `@AppStorage`
+///    会让上层 `body` 整棵树重算（时间轴里是几千张卡），一帧一帧掉下去就是卡顿。
+/// 3. **用增量 + 夹取**（而不是"起点 + 总位移"）：拖到最小/最大宽度卡住后反向立刻跟手，
+///    不存在要先把越界的位移"退回来"的死区。
+private struct ResizableSplit<Leading: View, Trailing: View>: View {
+    enum Side {
+        /// 受控列在左（图库：缩略图列宽度可变）
+        case leading
+        /// 受控列在右（地图：右侧详情列宽度可变）
+        case trailing
+    }
 
+    let key: String
+    let defaultValue: Double
+    var range: ClosedRange<Double>
+    var side: Side
+    /// 非受控那一列的最小宽度
+    var minOther: CGFloat = 300
+    /// 受控列最大占比（相对分割区域总宽）。nil = 不限占比，只用 range
+    var maxFraction: Double?
+    /// 右边那列是否显示。为 false 时左边独占整列
+    var trailingVisible: Bool = true
+    @ViewBuilder var leading: () -> Leading
+    @ViewBuilder var trailing: () -> Trailing
+
+    @AppStorage private var stored: Double
+    /// 拖动过程中的临时宽度，松手后清空
+    @State private var live: Double?
+    @State private var lastTranslation: CGFloat = 0
     @State private var dragging = false
-    @State private var startWidth: Double = 0
     @State private var hovering = false
 
+    /// 命中区 14pt：1pt 的细线用鼠标根本点不准，得留出足够的抓取范围
+    private let handleWidth: CGFloat = 14
+
+    init(key: String, defaultValue: Double, range: ClosedRange<Double>,
+         side: Side, minOther: CGFloat = 300, maxFraction: Double? = nil,
+         trailingVisible: Bool = true,
+         @ViewBuilder leading: @escaping () -> Leading,
+         @ViewBuilder trailing: @escaping () -> Trailing) {
+        self.key = key
+        self.defaultValue = defaultValue
+        self.range = range
+        self.side = side
+        self.minOther = minOther
+        self.maxFraction = maxFraction
+        self.trailingVisible = trailingVisible
+        self.leading = leading
+        self.trailing = trailing
+        _stored = AppStorage(wrappedValue: defaultValue, key)
+    }
+
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.primary.opacity(hovering || dragging ? 0.22 : 0.10))
-                .frame(width: 1)
+        GeometryReader { geo in
+            let width = controlledWidth(total: geo.size.width)
+            HStack(spacing: 0) {
+                if !trailingVisible {
+                    leading().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if side == .leading {
+                    leading().frame(width: width)
+                    handle(total: geo.size.width, current: width)
+                    trailing().frame(minWidth: minOther, maxWidth: .infinity)
+                } else {
+                    leading().frame(minWidth: minOther, maxWidth: .infinity)
+                    handle(total: geo.size.width, current: width)
+                    trailing().frame(width: width)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
-        .frame(width: 9)
+    }
+
+    // MARK: - 宽度
+
+    /// 受控列能到的最大值：给另一列留出 minOther，再叠加最大占比（如果设了）
+    private func maxControlled(total: CGFloat) -> Double {
+        let room = Double(max(0, total - handleWidth - minOther))
+        var cap = min(range.upperBound, max(range.lowerBound, room))
+        if let maxFraction {
+            cap = min(cap, Double(total) * maxFraction)
+        }
+        return max(range.lowerBound, cap)
+    }
+
+    private func controlledWidth(total: CGFloat) -> CGFloat {
+        let desired = live ?? stored
+        return CGFloat(min(max(desired, range.lowerBound), maxControlled(total: total)))
+    }
+
+    // MARK: - 分割条
+
+    private func handle(total: CGFloat, current: CGFloat) -> some View {
+        ZStack {
+            // 平时 1pt 细线，hover / 拖动时变成 3pt 的药丸，明确告诉用户这里能拖
+            Capsule()
+                .fill(Color.primary.opacity(dragging ? 0.42 : (hovering ? 0.28 : 0.12)))
+                .frame(width: dragging || hovering ? 3 : 1)
+        }
+        .frame(width: handleWidth)
+        .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
         .onHover { over in
             hovering = over
@@ -460,16 +539,33 @@ private struct ResizeHandle: View {
             }
         }
         .gesture(
-            DragGesture(minimumDistance: 1)
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
                     if !dragging {
                         dragging = true
-                        startWidth = width
+                        lastTranslation = 0
                     }
-                    width = min(max(startWidth + direction * value.translation.width,
-                                    range.lowerBound), range.upperBound)
+                    let delta = value.translation.width - lastTranslation
+                    lastTranslation = value.translation.width
+                    let dir: Double = side == .leading ? 1 : -1
+                    let next = (live ?? Double(current)) + dir * Double(delta)
+                    live = min(max(next, range.lowerBound), maxControlled(total: total))
                 }
-                .onEnded { _ in dragging = false }
+                .onEnded { _ in
+                    dragging = false
+                    lastTranslation = 0
+                    // 只在松手时落盘一次，拖动过程中不碰 UserDefaults
+                    if let live { stored = live }
+                    live = nil
+                }
         )
+        // 双击回到默认宽度：拖歪了不用一点点拽回来
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                live = nil
+                stored = defaultValue
+            }
+        )
+        .help("拖动调整宽度，双击恢复默认")
     }
 }

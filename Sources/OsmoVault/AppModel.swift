@@ -205,8 +205,9 @@ final class AppModel: ObservableObject {
     private var visibleIDs: Set<Int64> = []
     private var prewarmTask: Task<Void, Never>?
 
-    /// 卡片滚进可视区时上报一次。真正要生成的缩略图由 cell 自己的 .task 发起（前台优先级），
-    /// 这里只负责"顺手把前后各一屏半也补上"，避免刚滚过去一片空白
+    /// 卡片滚进可视区时上报一次。真正要生成的缩略图由 cell 自己发起（只有它真的在屏幕上才发），
+    /// 这里只顺手补**一屏以内**的前后几张，避免快速滚动时一片空白。
+    /// 以前这里是 ±120（一次就是 240 条），启动和每次滚动停顿都会白解几百张看不见的图
     func noteVisible(_ id: Int64) {
         visibleIDs.insert(id)
         prewarmTask?.cancel()
@@ -225,7 +226,8 @@ final class AppModel: ObservableObject {
         let order = currentDerived().order
         let indices = ids.compactMap { order[$0] }.sorted()
         guard let first = indices.first, let last = indices.last else { return }
-        let pad = 120
+        // 一屏大约 25 张，前后各留 10 张足够覆盖滚动时的空白
+        let pad = 10
         let from = max(0, first - pad)
         let to = min(assets.count, last + pad)
         guard to > from else { return }

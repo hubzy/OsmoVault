@@ -113,7 +113,6 @@ struct MapView: View {
                         .font(.system(size: 8))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.white)
                         .offset(y: -4)
-                        .shadow(radius: 1)
                 }
             } else {
                 ZStack {
@@ -244,9 +243,12 @@ struct MapView: View {
 
         var result: [Cluster] = []
         result.reserveCapacity(buckets.count)
-        for (key, b) in buckets {
+        for b in buckets.values {
             guard let asset = b.asset else { continue }
-            result.append(Cluster(id: key,
+            // id 用代表素材而不是网格 key：网格 key 随缩放级别整个换一遍，
+            // 会让 MapKit 把所有标记销毁重建，视觉上就是缩放结束后标签集体闪一下/抖一下。
+            // 代表素材 id 在同一缩放级别下是稳定的，没变的点视图原样保留
+            result.append(Cluster(id: "c-\(asset.id ?? -1)",
                                   latitude: b.latSum / Double(b.count),
                                   longitude: b.lonSum / Double(b.count),
                                   count: b.count,

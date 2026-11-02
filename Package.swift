@@ -3,7 +3,8 @@ import PackageDescription
 
 let package = Package(
     name: "OsmoVault",
-    platforms: [.macOS(.v14)],
+    // 15.0：网格"真正可见才加载"用 onScrollVisibilityChange（macOS 15 起提供）
+    platforms: [.macOS("15.0")],
     products: [
         .executable(name: "OsmoVault", targets: ["OsmoVault"])
     ],

@@ -459,9 +459,6 @@ private struct ResizableSplit<Leading: View, Trailing: View>: View {
     @AppStorage private var stored: Double
     /// 拖动过程中的临时宽度，松手后清空
     @State private var live: Double?
-    @State private var lastTranslation: CGFloat = 0
-    @State private var dragging = false
-    @State private var hovering = false
 
     /// 命中区 14pt：1pt 的细线用鼠标根本点不准，得留出足够的抓取范围
     private let handleWidth: CGFloat = 14
@@ -523,51 +520,179 @@ private struct ResizableSplit<Leading: View, Trailing: View>: View {
     // MARK: - 分割条
 
     private func handle(total: CGFloat, current: CGFloat) -> some View {
-        ZStack {
-            // 平时 1pt 细线，hover / 拖动时变成 3pt 的药丸，明确告诉用户这里能拖
-            Capsule()
-                .fill(Color.primary.opacity(dragging ? 0.42 : (hovering ? 0.28 : 0.12)))
-                .frame(width: dragging || hovering ? 3 : 1)
-        }
+        // 整个分割条（高亮 + 拖拽 + 光标）都用原生 NSView 绘制，SwiftUI 不再参与
+        // 这一区域的重绘。这样 AppKit 的 addCursorRect 才不会被 SwiftUI 的光标管理
+        // 在重绘时重置掉——之前无论用 NSCursor.push 还是 addCursorRect 都失败，根因
+        // 就在这附近还有 SwiftUI 重绘。高亮改由 NSView 内部的 CALayer 画。
+        SplitHandleView(
+            isLeading: side == .leading,
+            range: range,
+            minOther: minOther,
+            maxFraction: maxFraction,
+            handleWidth: handleWidth,
+            total: total,
+            current: current,
+            defaultValue: defaultValue,
+            live: $live,
+            stored: $stored
+        )
         .frame(width: handleWidth)
         .frame(maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onHover { over in
-            hovering = over
-            if over {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
+        .help("拖动调整宽度，双击恢复默认")
+    }
+}
+
+/// 原生 NSView 绘制的分割条：高亮、拖拽、光标全在这里面，SwiftUI 完全不参与。
+///
+/// 之前两版都失败的根因：只要这一带还有 SwiftUI 重绘（无论是被 @State 驱动的
+/// 胶囊高亮，还是被 .onHover 触发的重绘），AppKit 在重绘时就会把光标重置回箭头，
+/// 于是「高亮有了、光标没变」。现在高亮改由本视图内部的 CALayer 绘制，SwiftUI 不
+/// 再重绘此区域，addCursorRect 才能稳定生效。
+fileprivate struct SplitHandleView: NSViewRepresentable {
+    var isLeading: Bool
+    var range: ClosedRange<Double>
+    var minOther: CGFloat
+    var maxFraction: Double?
+    var handleWidth: CGFloat
+    var total: CGFloat
+    var current: CGFloat
+    var defaultValue: Double
+    @Binding var live: Double?
+    @Binding var stored: Double
+
+    func makeNSView(context: Context) -> NSView {
+        let view = _HandleView()
+        view.configure(isLeading: isLeading, range: range, minOther: minOther,
+                       maxFraction: maxFraction, handleWidth: handleWidth,
+                       defaultValue: defaultValue,
+                       live: $live, stored: $stored)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let view = nsView as? _HandleView {
+            view.update(total: total, current: current)
+            // 布局/尺寸变化时让窗口重算光标区域，保证与命中区一致
+            nsView.window?.invalidateCursorRects(for: nsView)
+        }
+    }
+
+    final class _HandleView: NSView {
+        private let highlight = CALayer()
+        private var isHovering = false
+        private var isDragging = false
+        private var isLeading = true
+        private var range = 0.0...1000.0
+        private var minOther: CGFloat = 300
+        private var maxFraction: Double?
+        private var handleWidth: CGFloat = 14
+        private var defaultValue = 0.0
+        private var total: CGFloat = 0
+        private var current: CGFloat = 0
+        private var startWidth: Double = 0
+        private var startLocation: CGFloat = 0
+        private var live: Binding<Double?>?
+        private var stored: Binding<Double>?
+        private var pan: NSPanGestureRecognizer!
+
+        func configure(isLeading: Bool, range: ClosedRange<Double>, minOther: CGFloat,
+                       maxFraction: Double?, handleWidth: CGFloat, defaultValue: Double,
+                       live: Binding<Double?>, stored: Binding<Double>) {
+            self.isLeading = isLeading
+            self.range = range
+            self.minOther = minOther
+            self.maxFraction = maxFraction
+            self.handleWidth = handleWidth
+            self.defaultValue = defaultValue
+            self.live = live
+            self.stored = stored
+        }
+
+        func update(total: CGFloat, current: CGFloat) {
+            self.total = total
+            self.current = current
+        }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            highlight.cornerRadius = 1.5
+            layer?.addSublayer(highlight)
+            pan = NSPanGestureRecognizer(target: self, action: #selector(panChanged(_:)))
+            addGestureRecognizer(pan)
+            let dbl = NSClickGestureRecognizer(target: self, action: #selector(doubleTap(_:)))
+            dbl.numberOfClicksRequired = 2
+            addGestureRecognizer(dbl)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func layout() {
+            super.layout()
+            let active = isDragging || isHovering
+            let w: CGFloat = active ? 3 : 1
+            highlight.frame = CGRect(x: (bounds.width - w) / 2, y: 0, width: w, height: bounds.height)
+            let alpha: CGFloat = isDragging ? 0.42 : (isHovering ? 0.28 : 0.12)
+            highlight.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+        }
+
+        // 自己接收事件：拖拽手势和光标都在这一层，不再需要穿透
+        override func hitTest(_ point: NSPoint) -> NSView? { self }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            addCursorRect(bounds, cursor: .resizeLeftRight)
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeAlways, .inVisibleRect]
+            addTrackingArea(NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil))
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            isHovering = true
+            needsLayout = true
+        }
+        override func mouseExited(with event: NSEvent) {
+            isHovering = false
+            needsLayout = true
+        }
+
+        private func maxControlled(total: CGFloat) -> Double {
+            let room = Double(max(0, total - handleWidth - minOther))
+            var cap = min(range.upperBound, max(range.lowerBound, room))
+            if let mf = maxFraction { cap = min(cap, Double(total) * mf) }
+            return max(range.lowerBound, cap)
+        }
+
+        @objc private func panChanged(_ gesture: NSPanGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                isDragging = true
+                startWidth = live?.wrappedValue ?? Double(current)
+                startLocation = gesture.location(in: nil).x
+                needsLayout = true
+            case .changed:
+                let t = gesture.location(in: nil).x - startLocation
+                let dir: Double = isLeading ? 1 : -1
+                let next = startWidth + dir * Double(t)
+                live?.wrappedValue = min(max(next, range.lowerBound), maxControlled(total: total))
+            case .ended, .cancelled, .failed:
+                isDragging = false
+                if let value = live?.wrappedValue { stored?.wrappedValue = value }
+                live?.wrappedValue = nil
+                needsLayout = true
+            default:
+                break
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { value in
-                    if !dragging {
-                        dragging = true
-                        lastTranslation = 0
-                    }
-                    let delta = value.translation.width - lastTranslation
-                    lastTranslation = value.translation.width
-                    let dir: Double = side == .leading ? 1 : -1
-                    let next = (live ?? Double(current)) + dir * Double(delta)
-                    live = min(max(next, range.lowerBound), maxControlled(total: total))
-                }
-                .onEnded { _ in
-                    dragging = false
-                    lastTranslation = 0
-                    // 只在松手时落盘一次，拖动过程中不碰 UserDefaults
-                    if let live { stored = live }
-                    live = nil
-                }
-        )
-        // 双击回到默认宽度：拖歪了不用一点点拽回来
-        .simultaneousGesture(
-            TapGesture(count: 2).onEnded {
-                live = nil
-                stored = defaultValue
-            }
-        )
-        .help("拖动调整宽度，双击恢复默认")
+
+        @objc private func doubleTap(_ gesture: NSClickGestureRecognizer) {
+            guard gesture.state == .ended else { return }
+            live?.wrappedValue = nil
+            stored?.wrappedValue = defaultValue
+        }
     }
 }

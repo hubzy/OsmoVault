@@ -364,7 +364,11 @@ private struct TimelineScroller: View {
                                 AssetGridView(assets: undated, selectedAssetID: $selectedAssetID,
                                               onRate: onRate, onDelete: onDelete,
                                               onToggleFavorite: onToggleFavorite,
-                                              onVisible: onVisible, embedded: true)
+                                              onVisible: onVisible,
+                                              selectionMode: selectionMode,
+                                              checkedIDs: checkedIDs,
+                                              onToggleCheck: onToggleCheck,
+                                              embedded: true)
                             } header: {
                                 HStack(spacing: 8) {
                                     Text("未知拍摄时间").font(.title3).bold()

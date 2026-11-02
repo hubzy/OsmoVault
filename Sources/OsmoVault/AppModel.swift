@@ -330,6 +330,15 @@ final class AppModel: ObservableObject {
         invalidateDerived()
     }
 
+    /// 批量移到回收站（多选后一次移入）。单个版本只是它的特例
+    func moveToTrash(ids: [Int64]) {
+        let set = Set(ids)
+        guard !set.isEmpty else { return }
+        try? database.setDeleted(ids: Array(set), deleted: true)
+        assets.removeAll { guard let id = $0.id else { return false }; return set.contains(id) }
+        invalidateDerived()
+    }
+
     func restore(id: Int64) {
         try? database.setDeleted(id: id, deleted: false)
         reloadAssets()

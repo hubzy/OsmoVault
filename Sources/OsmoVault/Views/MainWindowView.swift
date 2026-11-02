@@ -284,6 +284,8 @@ struct MainWindowView: View {
                     isLocationPage: isLocationPage,
                     // 只在「补定位」页挂这个入口，其他页面不再冒出「补定位 N」按钮
                     onAssignLocation: isLocationPage ? { locationTarget = .batch($0) } : nil,
+                    // 所有页面都能多选后批量移入回收站
+                    onDeleteSelected: { appModel.moveToTrash(ids: $0.compactMap(\.id)) },
                     emptyHint: hint)
     }
 

@@ -267,29 +267,33 @@ private struct LivePhotoStage: View {
             // 按素材比例算出画面框：LIVE 标记要贴在**图片**的左上角，
             // 而不是整个舞台（舞台比图片宽/高时贴边会跑到信箱区里）
             let fitted = Self.fit(in: geo.size, ratio: ratio)
-            ZStack(alignment: .topLeading) {
-                PhotoStage(asset: asset)
-                if playing {
-                    PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+            ZStack {
+                // 悬停 / 点击只作用在**图片框本身**：舞台比图片大时四周会有信箱留白，
+                // 鼠标落在留白区域不再误触发实况播放 —— 必须移到图片上才开始播
+                ZStack(alignment: .topLeading) {
+                    PhotoStage(asset: asset)
+                    if playing {
+                        PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+                    }
+                    LiveBadge(enabled: liveEnabled, playing: playing) { toggleLive() }
+                        .padding(8)
                 }
-                LiveBadge(enabled: liveEnabled, playing: playing) { toggleLive() }
-                    .padding(8)
+                .frame(width: fitted.width, height: fitted.height)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    guard liveEnabled else { return }
+                    if hovering {
+                        start()
+                    } else if playing {
+                        stop()
+                    }
+                }
+                .onTapGesture {
+                    guard liveEnabled else { return }
+                    if playing { stop() } else { start() }
+                }
             }
-            .frame(width: fitted.width, height: fitted.height)
             .frame(width: geo.size.width, height: geo.size.height)
-        }
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            guard liveEnabled else { return }
-            if hovering {
-                start()
-            } else if playing {
-                stop()
-            }
-        }
-        .onTapGesture {
-            guard liveEnabled else { return }
-            if playing { stop() } else { start() }
         }
         .onChange(of: asset.id) { _, _ in liveEnabled = true }
         .onDisappear { stop() }

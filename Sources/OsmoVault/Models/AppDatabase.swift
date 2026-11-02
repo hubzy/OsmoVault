@@ -85,6 +85,18 @@ final class AppDatabase {
         }
     }
 
+    /// 批量标记删除状态（移到回收站 / 恢复），一个事务搞定
+    func setDeleted(ids: [Int64], deleted: Bool) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+            var arguments: [DatabaseValueConvertible?] = [deleted]
+            for id in ids { arguments.append(id) }
+            try db.execute(sql: "UPDATE asset SET isDeleted = ? WHERE id IN (\(placeholders))",
+                           arguments: StatementArguments(arguments))
+        }
+    }
+
     func save(_ asset: inout Asset) throws {
         try dbWriter.write { db in
             try asset.save(db)

@@ -18,6 +18,8 @@ struct LibraryView: View {
     var isLocationPage = false
     /// 批量补定位：把**用户勾选**的那些素材交给调用方
     var onAssignLocation: (([Asset]) -> Void)?
+    /// 多选后的批量操作：普通页是「移入回收站」，由调用方决定具体动作
+    var onDeleteSelected: (([Asset]) -> Void)?
     var emptyHint: String?
 
     /// 「补定位」页的多选状态。素材补完后会从本页消失，勾选集合跟着清理
@@ -74,10 +76,10 @@ struct LibraryView: View {
             }
             Spacer(minLength: 0)
 
-            // 批量补定位只在这一页出现：先勾选，再一次性给勾中的那些标位置。
-            // 以前那个「补定位 N」会不看选择地把整页缺定位素材全标上，现在换成选择性批量
-            if isLocationPage, !assets.isEmpty {
-                locationToolbar
+            // 多选入口每个页面都有：先「选择」进入多选，勾完再批量处理。
+            // 批量动作因页而异——补定位页是「补定位」，普通页是「移入回收站」
+            if !assets.isEmpty {
+                selectionToolbar
             }
         }
         .padding(.horizontal, 16)
@@ -93,14 +95,14 @@ struct LibraryView: View {
     }
 
     @ViewBuilder
-    private var locationToolbar: some View {
+    private var selectionToolbar: some View {
         Button(selectionMode ? "完成" : "选择") {
             selectionMode.toggle()
             if !selectionMode { checkedIDs.removeAll() }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .help(selectionMode ? "退出多选" : "进入多选，勾选要补定位的素材")
+        .help(selectionMode ? "退出多选" : "进入多选，勾选要处理的素材")
 
         if selectionMode {
             Button(checkedIDs.count == assets.count ? "取消全选" : "全选") {
@@ -118,17 +120,33 @@ struct LibraryView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
 
-            Button {
-                let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
-                guard !picked.isEmpty else { return }
-                onAssignLocation?(picked)
-            } label: {
-                Label("补定位 已选 \(checkedIDs.count)", systemImage: "mappin.circle")
+            // 主操作：补定位页额外有「补定位」，所有页面都有「移入回收站」
+            if isLocationPage, let onAssign = onAssignLocation {
+                Button {
+                    let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+                    guard !picked.isEmpty else { return }
+                    onAssign(picked)
+                } label: {
+                    Label("补定位 已选 \(checkedIDs.count)", systemImage: "mappin.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(checkedIDs.isEmpty)
+                .help("只给勾中的 \(checkedIDs.count) 个素材标同一个位置")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(checkedIDs.isEmpty)
-            .help("只给勾中的 \(checkedIDs.count) 个素材标同一个位置")
+            if let onDeleteSelected {
+                Button {
+                    let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+                    guard !picked.isEmpty else { return }
+                    onDeleteSelected(picked)
+                } label: {
+                    Label("移入回收站 已选 \(checkedIDs.count)", systemImage: "trash")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(checkedIDs.isEmpty)
+                .help("把勾中的 \(checkedIDs.count) 个素材移入回收站")
+            }
         }
     }
 
@@ -199,7 +217,7 @@ struct LibraryView: View {
                              onRate: onRate, onDelete: onDelete,
                              onToggleFavorite: onToggleFavorite,
                              onVisible: onVisible,
-                             selectionMode: isLocationPage && selectionMode,
+                             selectionMode: selectionMode,
                              checkedIDs: checkedIDs,
                              onToggleCheck: toggleCheck)
         }

@@ -54,6 +54,9 @@ final class RulerWheelNSView: NSView {
         var cur = superview
         while let v = cur {
             if let sv = v as? NSScrollView {
+                // 刻度尺不该被拖出内容范围：关掉回弹，滚动范围严格等于刻度本身
+                sv.horizontalScrollElasticity = .none
+                sv.verticalScrollElasticity = .none
                 scrollView = sv
                 return sv
             }
@@ -62,11 +65,15 @@ final class RulerWheelNSView: NSView {
         return nil
     }
 
-    /// 直接推内容原点：`scroll(to:)` 会自动夹在文档范围内，滚到头就停住
+    /// 直接推内容原点，并**显式夹在文档范围内**：刻度尺只能在一月到最后一月之间平移，
+    /// 滚到头就停住，不会拖出一片空白（也不再把手势漏给下面的列表）
     private func scrollBy(x: CGFloat, in sv: NSScrollView) {
         let clip = sv.contentView
+        let visibleW = clip.bounds.width
+        let docW = clip.documentView?.frame.width ?? visibleW
+        let maxX = max(0, docW - visibleW)
         var origin = clip.bounds.origin
-        origin.x += x
+        origin.x = min(max(origin.x + x, 0), maxX)
         clip.scroll(to: origin)
         sv.reflectScrolledClipView(clip)
     }

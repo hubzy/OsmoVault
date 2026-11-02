@@ -10,6 +10,12 @@ struct MainWindowView: View {
     @State private var playerController = PlayerController()
     /// 侧边栏右键来源后待确认移除的文件夹
     @State private var sourceToRemove: String?
+    /// 手动补定位（单个 / 批量）
+    @State private var locationTarget: LocationEditTarget?
+    /// 地图页右侧详情列宽度，拖动后记住，下次打开不用重新拖
+    @AppStorage("mapDetailWidth") private var mapDetailWidth: Double = 380
+    /// 图库页缩略图列宽度。拖过一次就记下来，窗口宽度怎么变都以这个为准
+    @AppStorage("libraryColumnWidth") private var libraryColumnWidth: Double = 620
 
     private var removeMessage: String {
         guard let path = sourceToRemove else { return "" }
@@ -45,6 +51,14 @@ struct MainWindowView: View {
         return false
     }
 
+    /// 回收站 / 一键出片 / 重复素材是自成一体的一整页，右侧不再挂详情列
+    private var showsDetailPane: Bool {
+        switch section {
+        case .trash, .quickCut, .duplicates: return false
+        default: return true
+        }
+    }
+
     private var sidebar: some View {
         SidebarView(selection: $section, assets: appModel.assets,
                     sources: appModel.sourceItems,
@@ -66,12 +80,9 @@ struct MainWindowView: View {
             } else {
                 NavigationSplitView {
                     sidebar
-                } content: {
-                    mainContent
-                        .navigationSplitViewColumnWidth(min: 380, ideal: 560, max: 1200)
                 } detail: {
-                    detailContent
-                        .navigationSplitViewColumnWidth(min: 320, ideal: 460)
+                    libraryAndDetail
+                        .navigationSplitViewColumnWidth(min: 680, ideal: 1080, max: 4000)
                 }
             }
         }
@@ -112,6 +123,20 @@ struct MainWindowView: View {
         } message: {
             Text(removeMessage)
         }
+        .sheet(item: $locationTarget) { target in
+            LocationEditorSheet(
+                target: target,
+                onApply: { coordinate, placeName in
+                    appModel.setLocation(ids: target.ids,
+                                         latitude: coordinate.latitude,
+                                         longitude: coordinate.longitude,
+                                         placeName: placeName)
+                },
+                onClear: {
+                    appModel.clearLocation(ids: target.ids)
+                }
+            )
+        }
         .overlay(alignment: .bottom) {
             VStack(spacing: 6) {
                 // 注意用 scanProgress 而不是 isScanning 判断：完成后 isScanning 已经置 false，
@@ -140,20 +165,54 @@ struct MainWindowView: View {
 
     // MARK: - 地图页
 
-    /// 全屏地图 + 右侧浮出的详情卡（点标记才出现）
+    /// 地图占左侧，详情是右侧一**列**（和图库一样，不是浮窗），
+    /// 中间的分割条可以拖，宽度记在 UserDefaults 里。没选中素材时地图占满整列
     private var mapContent: some View {
-        MapView(assets: appModel.geotaggedAssets,
-                version: appModel.assetsVersion,
-                selectedAssetID: $selectedAssetID)
-            .overlay(alignment: .trailing) { mapDetailCard }
-            .animation(.easeOut(duration: 0.18), value: selectedAssetID)
-            .navigationSplitViewColumnWidth(min: 520, ideal: 900, max: 4000)
+        HStack(spacing: 0) {
+            MapView(assets: appModel.geotaggedAssets,
+                    version: appModel.assetsVersion,
+                    selectedAssetID: $selectedAssetID)
+                .frame(minWidth: 320)
+
+            if selectedAsset != nil {
+                // 详情在右：向右拖 → 详情变窄，所以方向取 -1
+                ResizeHandle(width: $mapDetailWidth, range: 300...760, direction: -1)
+                mapDetailColumn
+            }
+        }
+        .navigationSplitViewColumnWidth(min: 520, ideal: 900, max: 4000)
+    }
+
+    /// 缩略图列 + 详情列。
+    ///
+    /// 这里用自己画的分割条，而不是 NavigationSplitView 的第三列：三列的宽度
+    /// 只能给 min/ideal/max，拿不到拖动后的实际值也没法绑定，拖完下次启动又回去了。
+    /// 自己画之后宽度直接写进 @AppStorage，拖一次永久生效
+    private var libraryAndDetail: some View {
+        GeometryReader { geo in
+            HStack(spacing: 0) {
+                if showsDetailPane {
+                    mainContent.frame(width: contentWidth(in: geo.size.width))
+                    ResizeHandle(width: $libraryColumnWidth, range: 360...1100, direction: 1)
+                    detailContent.frame(minWidth: 300, maxWidth: .infinity)
+                } else {
+                    mainContent.frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    /// 记住的宽度优先，但窗口太窄时让详情列保住 300 的下限，避免两列挤出可视区
+    private func contentWidth(in total: CGFloat) -> CGFloat {
+        let room = max(360, total - 9 - 300)
+        return min(CGFloat(libraryColumnWidth), room)
     }
 
     @ViewBuilder
-    private var mapDetailCard: some View {
+    private var mapDetailColumn: some View {
         if let asset = selectedAsset {
-            HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                LibraryPathBar(path: libraryPath, assetCount: libraryPathCount)
                 Divider()
                 ZStack(alignment: .topTrailing) {
                     AssetDetailView(
@@ -163,7 +222,8 @@ struct MainWindowView: View {
                         onColor: { appModel.setColorLabel(id: $0, label: $1) },
                         onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
                         onGrab: grabFrame,
-                        onDelete: { deleteAsset(asset.id ?? 0) }
+                        onDelete: { deleteAsset(asset.id ?? 0) },
+                        onEditLocation: { locationTarget = .single(asset) }
                     )
                     .onAppear { load(asset) }
                     .onChange(of: asset.id) { _, _ in
@@ -178,15 +238,12 @@ struct MainWindowView: View {
                             .symbolRenderingMode(.hierarchical)
                     }
                     .buttonStyle(.borderless)
-                    .help("关闭详情")
+                    .help("关闭详情（地图回到整列）")
                     .padding(8)
                 }
-                .frame(width: 380)
-                .background(.regularMaterial)
-                .shadow(radius: 8)
             }
-            .frame(maxHeight: .infinity)
-            .transition(.move(edge: .trailing))
+            .frame(width: mapDetailWidth)
+            .background(.background)
         }
     }
 
@@ -230,6 +287,7 @@ struct MainWindowView: View {
                     onDelete: deleteAsset,
                     onToggleFavorite: { appModel.toggleFavorite(id: $0) },
                     onVisible: { appModel.noteVisible($0) },
+                    onAssignLocation: { locationTarget = .batch($0) },
                     emptyHint: hint)
     }
 
@@ -254,7 +312,8 @@ struct MainWindowView: View {
                     onColor: { appModel.setColorLabel(id: $0, label: $1) },
                     onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
                     onGrab: grabFrame,
-                    onDelete: { deleteAsset(asset.id ?? 0) }
+                    onDelete: { deleteAsset(asset.id ?? 0) },
+                    onEditLocation: { locationTarget = .single(asset) }
                 )
                 .onAppear { load(asset) }
                 .onChange(of: asset.id) { _, _ in
@@ -365,5 +424,48 @@ struct ScanStatusBar: View {
             return "\(prefix) 导入完成：新增 \(newAssets) 个，跳过重复 \(duplicates) 个"
         }
         return "\(prefix) 导入完成：没有新素材，\(duplicates) 个已存在"
+    }
+}
+
+/// 可拖动的分割条。宽度直接写回绑定的 @AppStorage（拖完即落盘），
+/// 下次启动自动恢复，不用每次重拖
+private struct ResizeHandle: View {
+    @Binding var width: Double
+    var range: ClosedRange<Double>
+    /// +1：向右拖 = 被控列变宽（列在分割条左边）；-1：列在右边，方向相反
+    var direction: Double = 1
+
+    @State private var dragging = false
+    @State private var startWidth: Double = 0
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.primary.opacity(hovering || dragging ? 0.22 : 0.10))
+                .frame(width: 1)
+        }
+        .frame(width: 9)
+        .contentShape(Rectangle())
+        .onHover { over in
+            hovering = over
+            if over {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    if !dragging {
+                        dragging = true
+                        startWidth = width
+                    }
+                    width = min(max(startWidth + direction * value.translation.width,
+                                    range.lowerBound), range.upperBound)
+                }
+                .onEnded { _ in dragging = false }
+        )
     }
 }

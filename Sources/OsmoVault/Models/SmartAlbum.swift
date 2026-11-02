@@ -45,6 +45,8 @@ struct SmartAlbum: Identifiable, Hashable {
             },
             SmartAlbum(id: "highFps", name: "高帧率", systemImage: "speedometer") { $0.frameRate >= 50 },
             SmartAlbum(id: "geotagged", name: "带 GPS", systemImage: "mappin.circle") { $0.latitude != nil },
+            // 这一页就是「补定位」页：只有缺定位的素材，且只有这一页能做批量补定位
+            SmartAlbum(id: "noGPS", name: "补定位", systemImage: "mappin.slash.circle") { $0.latitude == nil },
             SmartAlbum(id: "labelRed", name: "红色标签", systemImage: "circle.fill") { $0.colorLabel == 1 },
             SmartAlbum(id: "labelOrange", name: "橙色标签", systemImage: "circle.fill") { $0.colorLabel == 2 },
             SmartAlbum(id: "labelGreen", name: "绿色标签", systemImage: "circle.fill") { $0.colorLabel == 3 },

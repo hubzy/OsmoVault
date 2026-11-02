@@ -14,7 +14,15 @@ struct LibraryView: View {
     var onToggleFavorite: ((Int64) -> Void)?
     /// 卡片滚进可视区时回调，用于按需生成缩略图
     var onVisible: ((Int64) -> Void)?
+    /// 只有「补定位」页才提供批量补定位入口，其他页面不放这个按钮
+    var isLocationPage = false
+    /// 批量补定位：把**用户勾选**的那些素材交给调用方
+    var onAssignLocation: (([Asset]) -> Void)?
     var emptyHint: String?
+
+    /// 「补定位」页的多选状态。素材补完后会从本页消失，勾选集合跟着清理
+    @State private var selectionMode = false
+    @State private var checkedIDs: Set<Int64> = []
 
     @State private var sections: [TimelineMonth] = []
     @State private var undated: [Asset] = []
@@ -42,6 +50,9 @@ struct LibraryView: View {
         sections = built
         undated = assets.filter { $0.recordedAt == nil }
         summaryText = makeSummary()
+        // 补完定位的素材已经从这一页消失，勾选集合同步收敛，不会越攒越多
+        let valid = Set(assets.compactMap(\.id))
+        checkedIDs.formIntersection(valid)
     }
 
     // MARK: - 顶部：标题 + 总量统计 + 视图切换
@@ -57,9 +68,63 @@ struct LibraryView: View {
                     .help(summaryText)
             }
             Spacer(minLength: 0)
+
+            // 批量补定位只在这一页出现：先勾选，再一次性给勾中的那些标位置。
+            // 以前那个「补定位 N」会不看选择地把整页缺定位素材全标上，现在换成选择性批量
+            if isLocationPage, !assets.isEmpty {
+                locationToolbar
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    private func toggleCheck(_ id: Int64) {
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
+        }
+    }
+
+    @ViewBuilder
+    private var locationToolbar: some View {
+        Button(selectionMode ? "完成" : "选择") {
+            selectionMode.toggle()
+            if !selectionMode { checkedIDs.removeAll() }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(selectionMode ? "退出多选" : "进入多选，勾选要补定位的素材")
+
+        if selectionMode {
+            Button(checkedIDs.count == assets.count ? "取消全选" : "全选") {
+                if checkedIDs.count == assets.count {
+                    checkedIDs.removeAll()
+                } else {
+                    checkedIDs = Set(assets.compactMap(\.id))
+                }
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+
+            Text("已选 \(checkedIDs.count) / \(assets.count)")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+
+            Button {
+                let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+                guard !picked.isEmpty else { return }
+                onAssignLocation?(picked)
+            } label: {
+                Label("补定位 已选 \(checkedIDs.count)", systemImage: "mappin.circle")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(checkedIDs.isEmpty)
+            .help("只给勾中的 \(checkedIDs.count) 个素材标同一个位置")
+        }
     }
 
     /// 数量 + 时间跨度 + 总时长，一行说清楚当前集合有多大
@@ -128,7 +193,10 @@ struct LibraryView: View {
                              selectedAssetID: $selectedAssetID,
                              onRate: onRate, onDelete: onDelete,
                              onToggleFavorite: onToggleFavorite,
-                             onVisible: onVisible)
+                             onVisible: onVisible,
+                             selectionMode: selectionMode,
+                             checkedIDs: checkedIDs,
+                             onToggleCheck: toggleCheck)
         }
     }
 
@@ -231,6 +299,10 @@ private struct TimelineScroller: View {
     var onDelete: ((Int64) -> Void)?
     var onToggleFavorite: ((Int64) -> Void)?
     var onVisible: ((Int64) -> Void)?
+    /// 「补定位」页多选：透传给卡片，选择模式下点卡片只勾选
+    var selectionMode = false
+    var checkedIDs: Set<Int64> = []
+    var onToggleCheck: ((Int64) -> Void)?
 
     /// 与列表滚动位置双向绑定的原始值，滚动过程中可能短暂回写 nil
     @State private var scrolledMonthID: String?
@@ -265,7 +337,11 @@ private struct TimelineScroller: View {
                                         AssetGridView(assets: day.items, selectedAssetID: $selectedAssetID,
                                                       onRate: onRate, onDelete: onDelete,
                                                       onToggleFavorite: onToggleFavorite,
-                                                      onVisible: onVisible, embedded: true)
+                                                      onVisible: onVisible,
+                                                      selectionMode: selectionMode,
+                                                      checkedIDs: checkedIDs,
+                                                      onToggleCheck: onToggleCheck,
+                                                      embedded: true)
                                     }
                                 }
                             } header: {
@@ -363,21 +439,21 @@ private struct TimelineScroller: View {
                     RulerWheelBridge().frame(width: 0, height: 0)
                     HStack(alignment: .bottom, spacing: 3) {
                         ForEach(Array(months.enumerated()), id: \.element.id) { index, month in
-                            // 跨年份只插一条细分隔线作方位参考。年份不再占一个刻度位，
+                            // 跨年份插一条细分隔线作方位参考。年份**不再单独占一个刻度位**，
                             // 否则 1 月会被年份标签顶掉（之前 1 月显示成 "2026"，看着像统计漏了）
                             if index > 0, months[index - 1].year != month.year {
                                 yearDivider
                             }
-                            monthTick(month: month, peak: peak) { onPick(month.id) }
+                            monthTick(month: month, peak: peak,
+                                      isYearStart: index == 0 || months[index - 1].year != month.year,
+                                      onTap: { onPick(month.id) })
                         }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                 }
             }
-            .frame(height: 58)
-            // 年份浮在刻度尺左上角，跟随当前所处的月份，不挤占月份标签的位置
-            .overlay(alignment: .topLeading) { yearBadge }
+            .frame(height: 72)
             // 手动滚动列表时，刻度尺上的当前月也要跟着滚进可视范围
             .onChange(of: activeMonthID) { _, newID in
                 guard let newID else { return }
@@ -388,46 +464,27 @@ private struct TimelineScroller: View {
         }
     }
 
-    /// 左上角年份：显示当前所处月份所属的年份
-    @ViewBuilder
-    private var yearBadge: some View {
-        if let year = currentYear {
-            HStack(spacing: 3) {
-                Image(systemName: "calendar").font(.system(size: 9))
-                Text("\(year)")
-                    .font(.caption2)
-                    .bold()
-                    .monospacedDigit()
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(.background.opacity(0.9)))
-            .padding(.leading, 12)
-            .padding(.top, 3)
-        }
-    }
-
-    private var currentYear: Int? {
-        if let id = activeMonthID, let m = months.first(where: { $0.id == id }) { return m.year }
-        return months.first?.year
-    }
-
     /// 跨年份的分隔线：只是一条细线，不占月份刻度位
     private var yearDivider: some View {
         Rectangle()
             .fill(Color.secondary.opacity(0.35))
-            .frame(width: 1, height: 26)
+            .frame(width: 1, height: 40)
             .padding(.horizontal, 3)
     }
 
     /// 刻度尺上的月份柱：高度 = 该月素材数占比，标签固定 "N月"
-    private func monthTick(month: TimelineMonth, peak: Double, onTap: @escaping () -> Void) -> some View {
+    private func monthTick(month: TimelineMonth, peak: Double,
+                           isYearStart: Bool, onTap: @escaping () -> Void) -> some View {
         Button(action: onTap) {
-            VStack(spacing: 3) {
+            VStack(spacing: 2) {
+                // 年份行：每年首月在自己这一列的**上方**标出年份，其余月份留同样高度占位。
+                // 占位保证了所有年份标签在同一条水平线上、柱子底部也仍然对齐
+                yearRow(month: month, isYearStart: isYearStart)
                 RoundedRectangle(cornerRadius: 2)
                     .fill(month.id == activeMonthID ? Color.accentColor : Color.accentColor.opacity(0.28))
                     .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 24))
+                    // 柱子区域固定高度 + 底部对齐：月份高低不同也不会把年份顶得歪歪扭扭
+                    .frame(height: 24, alignment: .bottom)
                 Text("\(month.month)月")
                     .font(.caption2)
                     .lineLimit(1)
@@ -439,6 +496,22 @@ private struct TimelineScroller: View {
         .buttonStyle(.plain)
         .help("\(month.title) · \(month.count) 个素材")
         .id(Self.rulerID(month.id))
+    }
+
+    /// 年份标签：贴在该年首月的左上角；非首月用等高空视图占位
+    @ViewBuilder
+    private func yearRow(month: TimelineMonth, isYearStart: Bool) -> some View {
+        if isYearStart {
+            Text("\(month.year)")
+                .font(.caption2)
+                .bold()
+                .monospacedDigit()
+                .foregroundStyle(month.id == activeMonthID ? .primary : .secondary)
+                .frame(width: 38, alignment: .leading)
+                .frame(height: 14, alignment: .bottom)
+        } else {
+            Color.clear.frame(width: 38, height: 14)
+        }
     }
 
     /// 刻度尺里的 id 单独加前缀，避免和列表里的月份 id 撞车

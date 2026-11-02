@@ -9,6 +9,10 @@ struct AssetGridView: View {
     var onToggleFavorite: ((Int64) -> Void)?
     /// 卡片滚进可视区时回调。缩略图改成按需生成后，靠它把"当前看到哪"传给 AppModel
     var onVisible: ((Int64) -> Void)?
+    /// 「补定位」页的多选：进入选择模式后点卡片 = 勾选，不再打开详情
+    var selectionMode = false
+    var checkedIDs: Set<Int64> = []
+    var onToggleCheck: ((Int64) -> Void)?
     var emptyHint: String?
     /// 嵌入别的滚动容器（比如时间轴）时置 true：不再套自己的 ScrollView，避免双层滚动
     var embedded = false
@@ -34,19 +38,31 @@ struct AssetGridView: View {
     @ViewBuilder
     private var cells: some View {
         ForEach(assets) { asset in
+            let id = asset.id ?? 0
             AssetCell(asset: asset,
                       isSelected: selectedAssetID == asset.id,
-                      onRate: { onRate(asset.id ?? 0, $0) },
-                      onToggleFavorite: onToggleFavorite == nil ? nil : { onToggleFavorite?(asset.id ?? 0) })
+                      checked: selectionMode && checkedIDs.contains(id),
+                      selectionMode: selectionMode,
+                      onRate: { onRate(id, $0) },
+                      onToggleFavorite: onToggleFavorite == nil ? nil : { onToggleFavorite?(id) })
                 .contentShape(Rectangle())
-                .onTapGesture { selectedAssetID = asset.id }
+                .onTapGesture {
+                    if selectionMode {
+                        onToggleCheck?(id)
+                    } else {
+                        selectedAssetID = asset.id
+                    }
+                }
                 // LazyVGrid 只实例化可视区的 cell，所以这里天然就是"滚到才生成"
                 .onAppear { if let id = asset.id { onVisible?(id) } }
                 .contextMenu {
-                    Button(asset.isFavorite ? "取消收藏" : "收藏") {
-                        onToggleFavorite?(asset.id ?? 0)
+                    if selectionMode {
+                        Button(checkedIDs.contains(id) ? "取消选中" : "选中") { onToggleCheck?(id) }
                     }
-                    Button("移到回收站") { onDelete?(asset.id ?? 0) }
+                    Button(asset.isFavorite ? "取消收藏" : "收藏") {
+                        onToggleFavorite?(id)
+                    }
+                    Button("移到回收站") { onDelete?(id) }
                 }
         }
     }
@@ -100,6 +116,9 @@ struct AsyncThumbView: View {
 struct AssetCell: View {
     let asset: Asset
     let isSelected: Bool
+    /// 「补定位」页的多选状态
+    var checked = false
+    var selectionMode = false
     var onRate: (Int) -> Void = { _ in }
     var onToggleFavorite: (() -> Void)?
 
@@ -124,6 +143,11 @@ struct AssetCell: View {
         .onHover { hovering in
             isHovered = hovering
             hoverTask?.cancel()
+            // 多选时不跑 hover 预览：勾选过程不该冒出一堆播放器 / 声音
+            guard !selectionMode else {
+                previewOn = false
+                return
+            }
             if hovering {
                 // 悬停 0.4s 才起播：鼠标扫过一排卡片时不会瞬间创建一堆 AVPlayer
                 hoverTask = Task { @MainActor in
@@ -154,9 +178,12 @@ struct AssetCell: View {
                                 .overlay { Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary) }
                         }
                         // 缩略图垫底 + 播放器叠加：首帧解码前不闪黑。
-                        // 实况照片播它的动态部分；纯照片不起播
-                        if previewOn, let playPath = asset.playbackPath {
+                        // 实况照片播它的动态部分；纯照片不起播；多选时一律不预览
+                        if previewOn, !selectionMode, let playPath = asset.playbackPath {
                             HoverPreviewPlayer(url: URL(fileURLWithPath: playPath))
+                        }
+                        if checked {
+                            Color.accentColor.opacity(0.18)
                         }
                     }
                 }
@@ -166,7 +193,8 @@ struct AssetCell: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                        .stroke(checked ? Color.accentColor : (isSelected ? Color.accentColor : Color.clear),
+                                lineWidth: checked ? 3 : 2)
                 )
 
             // 照片没有时长，改标类型；视频/实况标时长（实况另加一个角标记号）
@@ -193,7 +221,14 @@ struct AssetCell: View {
             .padding(6)
         }
         .overlay(alignment: .topTrailing) {
-            if asset.isFavorite || (isHovered && onToggleFavorite != nil) {
+            if selectionMode {
+                // 勾选框：整张卡片都是点击热区，这里只负责显示状态
+                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(checked ? Color.accentColor : .white)
+                    .shadow(radius: 2)
+                    .padding(6)
+            } else if asset.isFavorite || (isHovered && onToggleFavorite != nil) {
                 Button {
                     onToggleFavorite?()
                 } label: {

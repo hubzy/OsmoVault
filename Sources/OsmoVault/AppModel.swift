@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
 
     let database: AppDatabase
     private var placeNameTask: Task<Void, Never>?
+    /// 手动补定位后的地名反查，与扫描期的地名任务分开，互不取消
+    private var manualPlaceTask: Task<Void, Never>?
     private static let rootsKey = "OsmoVault.scanRoots"
     private static let historyKey = "OsmoVault.importHistory"
 
@@ -241,6 +243,17 @@ final class AppModel: ObservableObject {
         invalidateDerived()
     }
 
+    /// 批量 patch：遍历一次 assets 命中所有 id，
+    /// 别对每个 id 都调一次单条 patch（那是 O(n·m)）
+    private func patch(ids: Set<Int64>, _ mutate: (inout Asset) -> Void) {
+        guard !ids.isEmpty else { return }
+        for i in assets.indices {
+            guard let id = assets[i].id, ids.contains(id) else { continue }
+            mutate(&assets[i])
+        }
+        invalidateDerived()
+    }
+
     func setRating(id: Int64, rating: Int) {
         patch(id: id) { $0.rating = rating }
         try? database.updateRating(id: id, rating: rating)
@@ -256,6 +269,57 @@ final class AppModel: ObservableObject {
         let next = !target.isFavorite
         patch(id: id) { $0.isFavorite = next }
         try? database.setFavorite(id: id, favorite: next)
+    }
+
+    // MARK: - 手动补定位
+
+    /// 给一条素材补/改定位。placeName 留空会自动反查地名
+    func setLocation(id: Int64, latitude: Double, longitude: Double, placeName: String? = nil) {
+        setLocation(ids: [id], latitude: latitude, longitude: longitude, placeName: placeName)
+    }
+
+    /// 批量补定位：整批一个事务写库、一次内存 patch，地名只反查一次
+    /// （几百条素材各自发一次 CLGeocoder 请求必被限流）
+    func setLocation(ids: [Int64], latitude: Double, longitude: Double, placeName: String? = nil) {
+        guard !ids.isEmpty else { return }
+        let name = placeName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = (name?.isEmpty ?? true) ? nil : name
+        patch(ids: Set(ids)) {
+            $0.latitude = latitude
+            $0.longitude = longitude
+            $0.placeName = finalName
+        }
+        try? database.setLocation(ids: ids, latitude: latitude, longitude: longitude, placeName: finalName)
+        if finalName == nil { fillPlaceName(latitude: latitude, longitude: longitude, ids: ids) }
+    }
+
+    /// 清掉定位（填错了 / 不想标）。ids 可以是一批
+    func clearLocation(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        patch(ids: Set(ids)) {
+            $0.latitude = nil
+            $0.longitude = nil
+            $0.placeName = nil
+        }
+        try? database.setLocation(ids: ids, latitude: nil, longitude: nil, placeName: nil)
+    }
+
+    func clearLocation(id: Int64) { clearLocation(ids: [id]) }
+
+    /// 反查地名后回填。CLGeocoder 有限流，这里只发一个请求、结果写给整批
+    private func fillPlaceName(latitude: Double, longitude: Double, ids: [Int64]) {
+        manualPlaceTask?.cancel()
+        manualPlaceTask = Task { [weak self] in
+            guard let name = await GeocodingService.shared.placeName(latitude: latitude,
+                                                                     longitude: longitude) else { return }
+            guard !Task.isCancelled else { return }
+            self?.applyPlaceName(name, ids: ids)
+        }
+    }
+
+    private func applyPlaceName(_ name: String, ids: [Int64]) {
+        patch(ids: Set(ids)) { $0.placeName = name }
+        try? database.setPlaceName(ids: ids, name: name)
     }
 
     func moveToTrash(id: Int64) {

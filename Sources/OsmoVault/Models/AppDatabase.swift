@@ -143,6 +143,30 @@ final class AppDatabase {
         }
     }
 
+    /// 手动补/改定位。传 nil 表示清空（用户反悔或填错了）。
+    /// 整批放在一个事务里：批量补几百条也只有一次 fsync
+    func setLocation(ids: [Int64], latitude: Double?, longitude: Double?, placeName: String?) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            for id in ids {
+                try db.execute(
+                    sql: "UPDATE asset SET latitude = ?, longitude = ?, placeName = ? WHERE id = ?",
+                    arguments: [latitude, longitude, placeName, id]
+                )
+            }
+        }
+    }
+
+    /// 批量写地名（手动补定位后回填反查结果）
+    func setPlaceName(ids: [Int64], name: String) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            for id in ids {
+                try db.execute(sql: "UPDATE asset SET placeName = ? WHERE id = ?", arguments: [name, id])
+            }
+        }
+    }
+
     /// 彻底删除索引记录（不动磁盘文件）。用于移除误导入的重复来源
     func delete(ids: [Int64]) throws {
         guard !ids.isEmpty else { return }

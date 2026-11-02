@@ -52,6 +52,8 @@ struct AssetDetailView: View {
     var onToggleFavorite: (() -> Void)?
     var onGrab: (() -> Void)?
     var onDelete: (() -> Void)?
+    /// 手动补定位（没有 GPS 的素材也能在地图上找到）
+    var onEditLocation: (() -> Void)?
 
     /// 播放器还没报告真实尺寸时，先用素材库里记录的宽高兜底
     private var fallbackRatio: CGFloat {
@@ -119,7 +121,8 @@ struct AssetDetailView: View {
             // 信息区
             VStack(alignment: .leading, spacing: 8) {
                 ZoneHeader("信息")
-                InfoSection(asset: asset, onRate: onRate, onColor: onColor)
+                InfoSection(asset: asset, onRate: onRate, onColor: onColor,
+                            onEditLocation: onEditLocation)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -502,6 +505,7 @@ private struct InfoSection: View {
     let asset: Asset
     var onRate: ((Int64, Int) -> Void)?
     var onColor: ((Int64, Int) -> Void)?
+    var onEditLocation: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -513,7 +517,7 @@ private struct InfoSection: View {
             VStack(spacing: 5) {
                 infoRow("类型", asset.kind.name)
                 infoRow("时间", recordedText)
-                infoRow("地点", locationText)
+                locationRow
                 infoRow("规格", specText)
                 // 照片没有时长；实况照片的动态部分没抽取过时也不知道多长，别显示 00:00
                 if asset.kind != .photo, asset.durationSeconds > 0 { infoRow("时长", durationText) }
@@ -543,6 +547,29 @@ private struct InfoSection: View {
                 .font(.caption)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// 地点单独一行：没 GPS 的素材可以在这里手动补，右侧按钮直接编辑
+    private var locationRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("地点")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .leading)
+            Text(locationText)
+                .font(.caption)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                onEditLocation?()
+            } label: {
+                Image(systemName: asset.latitude == nil ? "mappin.slash.circle" : "pencil")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(asset.latitude == nil ? "手动补定位" : "修改定位")
         }
     }
 

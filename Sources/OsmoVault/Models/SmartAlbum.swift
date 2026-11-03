@@ -1,16 +1,21 @@
 import Foundation
+import SwiftUI
 
 /// 智能相册：按规则动态过滤素材，不用手动往里拖片子
 struct SmartAlbum: Identifiable, Hashable {
     let id: String
     let name: String
     let systemImage: String
+    /// 侧边栏图标着色（颜色标签相册用）。nil = 跟随系统默认（primary/secondary 层级色）
+    var tint: Color?
     private let match: (Asset) -> Bool
 
-    init(id: String, name: String, systemImage: String, match: @escaping (Asset) -> Bool) {
+    init(id: String, name: String, systemImage: String,
+         tint: Color? = nil, match: @escaping (Asset) -> Bool) {
         self.id = id
         self.name = name
         self.systemImage = systemImage
+        self.tint = tint
         self.match = match
     }
 
@@ -47,10 +52,11 @@ struct SmartAlbum: Identifiable, Hashable {
             SmartAlbum(id: "geotagged", name: "带 GPS", systemImage: "mappin.circle") { $0.latitude != nil },
             // 这一页就是「补定位」页：只有缺定位的素材，且只有这一页能做批量补定位
             SmartAlbum(id: "noGPS", name: "补定位", systemImage: "mappin.slash.circle") { $0.latitude == nil },
-            SmartAlbum(id: "labelRed", name: "红色标签", systemImage: "circle.fill") { $0.colorLabel == 1 },
-            SmartAlbum(id: "labelOrange", name: "橙色标签", systemImage: "circle.fill") { $0.colorLabel == 2 },
-            SmartAlbum(id: "labelGreen", name: "绿色标签", systemImage: "circle.fill") { $0.colorLabel == 3 },
-            SmartAlbum(id: "labelBlue", name: "蓝色标签", systemImage: "circle.fill") { $0.colorLabel == 4 },
+            // 颜色标签相册：侧边栏图标按 macOS 规范显示对应色（红橙绿蓝 = colorLabel 1-4）
+            SmartAlbum(id: "labelRed", name: "红色标签", systemImage: "circle.fill", tint: .red) { $0.colorLabel == 1 },
+            SmartAlbum(id: "labelOrange", name: "橙色标签", systemImage: "circle.fill", tint: .orange) { $0.colorLabel == 2 },
+            SmartAlbum(id: "labelGreen", name: "绿色标签", systemImage: "circle.fill", tint: .green) { $0.colorLabel == 3 },
+            SmartAlbum(id: "labelBlue", name: "蓝色标签", systemImage: "circle.fill", tint: .blue) { $0.colorLabel == 4 },
         ]
     }
 

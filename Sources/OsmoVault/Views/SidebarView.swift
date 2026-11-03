@@ -69,7 +69,7 @@ struct SidebarView: View {
             Section("智能相册") {
                 ForEach(albums, id: \.album.id) { item in
                     row(icon: item.album.systemImage, title: item.album.name, count: item.count,
-                        empty: item.count == 0)
+                        empty: item.count == 0, iconTint: item.album.tint)
                         // 空相册用语义色弱化但仍可点（禁止 .disabled(true)），方便先建规则后拍素材
                         .tag(SidebarItem.smartAlbum(item.album.id))
                 }
@@ -158,13 +158,15 @@ struct SidebarView: View {
     /// 空集合用语义色（.secondary / .primary）表达，不再用 .opacity 整体压暗：
     /// 整体透明度会连带把「选中行白字」也压成灰白，对比度直接不达标。
     /// 只给图标与计数上色，标题保持动态色（选中时由 List 自动切成白字）。
-    private func row(icon: String, title: String, count: Int? = nil, empty: Bool = false) -> some View {
+    /// iconTint 给颜色标签相册上色（macOS 规范：标签圆点带色）；空相册仍回退灰色
+    private func row(icon: String, title: String, count: Int? = nil,
+                     empty: Bool = false, iconTint: Color? = nil) -> some View {
         HStack(spacing: 6) {
             Label {
                 Text(title).lineLimit(1)
             } icon: {
                 Image(systemName: icon)
-                    .modifier(EmptyEmphasis(empty: empty))
+                    .modifier(EmptyEmphasis(empty: empty, tint: iconTint))
             }
             Spacer(minLength: 4)
             if let count {
@@ -180,11 +182,16 @@ struct SidebarView: View {
 
 /// .primary / .secondary 是层级形状样式，会跟随 List 选中行的前景色自适应，
 /// 不会像 Color.primary 那样把选中行白字覆盖成深色。
+/// 传了 tint（颜色标签相册）时始终显示 tint 色：空相册用半透明弱化但保留色彩（
+/// 之前把空相册整个降成灰色，用户以为是"没上色"），选中行也保持彩色=访达一致
 private struct EmptyEmphasis: ViewModifier {
     let empty: Bool
+    var tint: Color? = nil
 
     func body(content: Content) -> some View {
-        if empty {
+        if let tint {
+            content.foregroundStyle(empty ? tint.opacity(0.45) : tint)
+        } else if empty {
             content.foregroundStyle(.secondary)
         } else {
             content.foregroundStyle(.primary)

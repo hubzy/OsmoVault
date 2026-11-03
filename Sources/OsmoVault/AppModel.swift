@@ -54,6 +54,13 @@ final class AppModel: ObservableObject {
         // 启动就开始盯着已导入的文件夹：往里丢照片不用再手动导入一次
         startWatching()
         migrateManualAnnotationsIfNeeded()
+        // 启动后补一次存量素材的地名反查：历史素材如果导入时没触发反查（或当时
+        // CLGeocoder 失败），「拍摄地」分组会一直缺。后台串行间隔请求，不阻塞启动
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !self.isScanning else { return }
+            self.resolveMissingPlaceNames()
+        }
         // 老版本会把每张实况照片的动态视频都抽出来落盘，几千张能攒到几十 GB，
         // 而且新代码会直接复用已有文件、不会主动缩。启动时按配额清一次。
         Task.detached(priority: .background) {
@@ -166,6 +173,8 @@ final class AppModel: ObservableObject {
             // 素材文件读不到的那些，现在盘插回来了就一并补上（幂等，有 xmp 的自动跳过）
             if force { self.regenerateSidecars() }
             guard added > 0 else {
+                // 没新素材也顺手把缺的地名补上：手动刷新是用户主动操作，正好兜底
+                if force { self.resolveMissingPlaceNames() }
                 if force { self.showAutoStatus("已是最新，没有发现新素材") }
                 return
             }
@@ -902,10 +911,15 @@ final class AppModel: ObservableObject {
                     self.flushPlaceNames(pending)
                     pending.removeAll()
                 }
-                if resolved >= 400 { break }    // 一次别贪多，剩下的下次导入再补
+                // 不再设「一次 400」上限：存量缺地名的素材数千条，分轮永远补不完。
+                // CLGeocoder 串行 + 0.2s 间隔 ≈ 5 请求/秒，一轮跑完（失败项会话内不重试，
+                // 下次启动自动再补）
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
             self.flushPlaceNames(pending)
+            if resolved > 0 {
+                self.showAutoStatus("已补全 \(resolved) 个拍摄地的地名")
+            }
         }
     }
 

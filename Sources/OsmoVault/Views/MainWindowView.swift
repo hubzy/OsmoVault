@@ -52,12 +52,13 @@ struct MainWindowView: View {
         return false
     }
 
-    /// 回收站 / 一键出片 / 重复素材是自成一体的一整页，右侧不再挂详情列
+    /// 回收站 / 一键出片是自成一体的一整页，右侧不再挂详情列；
+    /// 重复素材页要点开卡片看详情，挂右侧详情列
     private var showsDetailPane: Bool { showsDetailPane(section) }
 
     private func showsDetailPane(_ item: SidebarItem?) -> Bool {
         switch item {
-        case .trash, .quickCut, .duplicates: return false
+        case .trash, .quickCut: return false
         default: return true
         }
     }
@@ -322,7 +323,7 @@ struct MainWindowView: View {
         case .quickCut:
             QuickCutPanel()
         case .duplicates:
-            DuplicateView()
+            DuplicateView(onOpen: { selectedAssetID = $0 })
         case .map:
             EmptyView()   // 地图页走两列布局，不会走到这里
         case .smartAlbum(let id):

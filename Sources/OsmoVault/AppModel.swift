@@ -685,8 +685,12 @@ final class AppModel: ObservableObject {
         // 只对粗筛命中的候选组做精筛。照片要读文件头，全库读一遍的话
         // 8000 张就是 2GB 磁盘 I/O + 主线程卡死
         var result: [[Asset]] = []
-        for group in buckets.values where group.count > 1 {
-            if group.contains(where: { $0.kind == .photo && $0.durationSeconds <= 0 }) {
+        // 注意判定用粗筛 key 前缀而非 kind：p- 桶 = 照片 + 实况照片（kind != video 且无时长）。
+        // 实况照片曾因 kind 不是 .photo 而被当成视频桶整组判重——
+        // 恰好同体积同分辨率的**不同**实况（华为机型常见）会被误报成重复。
+        // 与 countDuplicateGroups 同一口径，两侧数字才能一致
+        for (key, group) in buckets where group.count > 1 {
+            if key.hasPrefix("p-") {
                 var fine: [UInt64: [Asset]] = [:]
                 for a in group {
                     fine[Self.headFingerprint(a.filePath), default: []].append(a)

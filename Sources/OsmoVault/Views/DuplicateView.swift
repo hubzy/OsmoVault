@@ -7,6 +7,9 @@ import AppKit
 struct DuplicateView: View {
     @EnvironmentObject var appModel: AppModel
 
+    /// 点卡片打开素材详情（右侧详情列），由 MainWindowView 注入
+    var onOpen: ((Int64) -> Void)?
+
     @State private var pendingIDs: [Int64] = []
     @State private var showConfirm = false
 
@@ -35,7 +38,7 @@ struct DuplicateView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(groups, id: \.self.first?.id) { group in
-                            GroupCard(group: group) { ids in
+                            GroupCard(group: group, onOpen: onOpen) { ids in
                                 pendingIDs = ids
                                 showConfirm = true
                             }
@@ -89,6 +92,8 @@ struct DuplicateView: View {
 private struct DuplicateCard: View {
     let asset: Asset
     let isKeeper: Bool
+    /// 点缩略图打开详情
+    var onOpen: ((Int64) -> Void)?
     let onRemove: () -> Void
 
     @State private var isHovered = false
@@ -107,6 +112,10 @@ private struct DuplicateCard: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .onTapGesture { if let id = asset.id { onOpen?(id) } }
+                    .help("点开查看详情")
+                    .accessibilityAddTraits(.isButton)
 
                 VaultBadge {
                     HStack(spacing: 4) {
@@ -204,6 +213,8 @@ private struct DuplicateCard: View {
 private struct GroupCard: View {
     @EnvironmentObject var appModel: AppModel
     let group: [Asset]
+    /// 点卡片打开详情（透传自 DuplicateView）
+    var onOpen: ((Int64) -> Void)?
     let onRemove: ([Int64]) -> Void
 
     private var keeperID: Int64? {
@@ -237,9 +248,11 @@ private struct GroupCard: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 10)],
                       alignment: .leading, spacing: 10) {
                 ForEach(group) { asset in
-                    DuplicateCard(asset: asset, isKeeper: asset.id == keeperID) {
-                        if let id = asset.id { onRemove([id]) }
-                    }
+                    DuplicateCard(asset: asset, isKeeper: asset.id == keeperID,
+                                  onOpen: { id in onOpen?(id) },
+                                  onRemove: {
+                                      if let id = asset.id { onRemove([id]) }
+                                  })
                 }
             }
         }

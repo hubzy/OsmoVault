@@ -1,6 +1,23 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
+
+// MARK: - 素材拖放载荷
+
+extension UTType {
+    /// App 内素材拖放专用类型：避免和系统文本/文件的拖放混在一起
+    static let osmoVaultAsset = UTType(exportedAs: "com.osmovault.asset")
+}
+
+/// 素材池 → 片段顺序的拖放载荷：只带素材 id，落地时再查素材，
+/// 即使拖拽过程中库刷新过，id 也仍然有效
+struct DraggedAsset: Codable, Transferable {
+    let id: Int64
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .osmoVaultAsset)
+    }
+}
 
 /// 一键出片页（三列布局）：
 ///   左列  素材池（缩略图网格）—— 与片段列表并排，中间分隔条可拖动调节宽度
@@ -29,6 +46,8 @@ struct QuickCutPanel: View {
     @State private var aspect: QuickCutConfig.Aspect = .original
     @State private var clipSeconds: Double = 6
     @State private var onlyHighRated = false
+    /// 素材池多选开关：默认关，关上时点卡片不勾选（只拖拽）；打开后才可点选
+    @State private var multiSelect = false
 
     /// 上一次构建成功的预览时间线；配置变化后 computed 的 `previewDirty` 变 true，需点刷新
     @State private var prepared: PreparedTimeline?
@@ -43,7 +62,6 @@ struct QuickCutPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            autoBar
             HSplitView {
                 poolColumn
                     .frame(minWidth: 250, idealWidth: 320, maxWidth: 420)
@@ -52,7 +70,7 @@ struct QuickCutPanel: View {
             }
             .frame(maxHeight: .infinity)
             Divider()
-            settingsBar
+            exportBar
         }
         .padding(16)
         .frame(minWidth: 860)
@@ -80,44 +98,23 @@ struct QuickCutPanel: View {
         }
     }
 
-    /// 顶部操作行：自动出片 + 参数 + 清空
-    private var autoBar: some View {
-        HStack(spacing: 10) {
-            Button {
-                autoBuild()
-            } label: {
-                Label("自动出片", systemImage: "wand.and.stars")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(poolAssets.isEmpty)
-
-            Stepper(value: $clipSeconds, in: 1...60, step: 1) {
-                Text("每段 \(Int(clipSeconds))s").font(.caption).monospacedDigit()
-            }
-            .frame(width: 118)
-
-            Toggle("仅高评分", isOn: $onlyHighRated)
-                .font(.caption)
-                .help("只从评分 ≥ 4 的素材里选片段")
-
-            Spacer(minLength: 0)
-
-            Button("清空片段", role: .destructive) { confirmClearSegments = true }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(segments.isEmpty)
-        }
-    }
-
     // MARK: - 左列：素材池
 
     private var poolColumn: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Text("素材池").font(.headline)
-                Text(pickedIDs.isEmpty ? "用全部 \(videoAssets.count)" : "已选 \(pickedIDs.count)")
+                Text(multiSelect
+                     ? (pickedIDs.isEmpty ? "已选 0 个" : "已选 \(pickedIDs.count) 个")
+                     : "共 \(videoAssets.count) 个")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                Text("拖入右侧生成片段")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Toggle("多选", isOn: $multiSelect)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .help(multiSelect ? "多选已开启：点击卡片可勾选/取消" : "默认只可拖拽；开启后才能点选素材")
                 if !pickedIDs.isEmpty {
                     Button("取消勾选") { pickedIDs.removeAll() }.font(.caption)
                 }
@@ -136,33 +133,36 @@ struct QuickCutPanel: View {
     private func poolCell(_ asset: Asset) -> some View {
         let id = asset.id ?? 0
         let picked = pickedIDs.contains(id)
-        return Button {
-            if picked { pickedIDs.remove(id) } else { pickedIDs.insert(id) }
-        } label: {
-            VStack(spacing: 3) {
-                ZStack(alignment: .topTrailing) {
-                    AsyncThumbView(asset: asset)
-                        .frame(height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .frame(maxWidth: .infinity)
-                    if asset.rating >= 4 {
-                        Image(systemName: "star.fill")
-                            .font(.caption2).foregroundStyle(.yellow)
-                            .padding(3)
-                    }
+        return VStack(spacing: 3) {
+            ZStack(alignment: .topTrailing) {
+                AsyncThumbView(asset: asset)
+                    .frame(height: 44)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .frame(maxWidth: .infinity)
+                if asset.rating >= 4 {
+                    Image(systemName: "star.fill")
+                        .font(.caption2).foregroundStyle(.yellow)
+                        .padding(3)
                 }
-                Text(asset.fileName)
-                    .font(.caption2).lineLimit(1)
-                Text(String(format: "%.0fs", asset.durationSeconds))
-                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
             }
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(picked ? Color.accentColor : Color.clear, lineWidth: 2)
-            )
+            Text(asset.fileName)
+                .font(.caption2).lineLimit(1)
+            Text(String(format: "%.0fs", asset.durationSeconds))
+                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(picked ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        // 多选模式下点击切换勾选；默认只负责拖拽，点选交给「多选」开关
+        .onTapGesture {
+            guard multiSelect else { return }
+            if picked { pickedIDs.remove(id) } else { pickedIDs.insert(id) }
+        }
+        .draggable(DraggedAsset(id: id))
+        .help(multiSelect ? "点击切换勾选，或拖到右侧片段顺序" : "拖到右侧片段顺序生成片段（开启「多选」后可点击勾选）")
     }
 
     // MARK: - 片段顺序面板（预览进度条下方，高度随窗口在 150~290 之间伸缩）
@@ -179,22 +179,45 @@ struct QuickCutPanel: View {
                 VStack(spacing: 8) {
                     Image(systemName: "film.stack")
                         .font(.system(size: 22)).foregroundStyle(.tertiary)
-                    Text("点「自动出片」一键生成，或在素材池里勾选后重新生成")
+                    Text("把素材池的素材拖到这里生成片段\n或点「自动出片」一键生成")
                         .font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color.gray.opacity(0.07))
                 )
+                .dropDestination(for: DraggedAsset.self) { assets, _ in
+                    insertAssets(assets, at: segments.count)
+                    return true
+                }
             } else {
                 List {
-                    ForEach($segments) { $seg in
-                        segmentRow($seg)
+                    ForEach(Array(segments.enumerated()), id: \.element.id) { index, seg in
+                        segmentRow(Binding(
+                            get: { segments[index] },
+                            set: { segments[index] = $0 }
+                        ))
+                        // 落到某一行上 = 插入到该行之前
+                        .dropDestination(for: DraggedAsset.self) { assets, _ in
+                            insertAssets(assets, at: index)
+                            return true
+                        }
                     }
                 }
                 .listStyle(.inset)
+                // 落到列表空白处 = 追加到末尾
+                .dropDestination(for: DraggedAsset.self) { assets, _ in
+                    insertAssets(assets, at: segments.count)
+                    return true
+                }
             }
+        }
+        // 兜底接收：落到标题行/分隔间隙等任何位置都能追加，命中上方空态/行/列表时它们优先
+        .dropDestination(for: DraggedAsset.self) { assets, _ in
+            insertAssets(assets, at: segments.count)
+            return true
         }
         .frame(minHeight: 150, maxHeight: 290)
     }
@@ -262,7 +285,8 @@ struct QuickCutPanel: View {
                 }
             }
             videoStage
-            previewBar
+            progressRow
+            quickCutRow
             segmentPanel
         }
     }
@@ -308,12 +332,27 @@ struct QuickCutPanel: View {
         .contentShape(Vault.shape(Vault.R.container))
     }
 
-    /// 功能操作区：进度条 + 时间 + 播放/从头/静音
-    private var previewBar: some View {
+    /// 进度条行：播放控制 + 当前时间 + 可拖进度 + 总长
+    private var progressRow: some View {
         HStack(spacing: 6) {
+            VaultIconButton(preview.isPlaying ? "暂停" : "播放",
+                            systemImage: preview.isPlaying ? "pause.fill" : "play.fill",
+                            symbolSize: 15, hit: 26,
+                            isDisabled: !preview.isReady) {
+                preview.togglePlay()
+            }
+            VaultIconButton("从头播放", systemImage: "backward.end.fill", symbolSize: 14, hit: 26,
+                            isDisabled: !preview.isReady) {
+                preview.playFromStart()
+            }
+            VaultIconButton(preview.isMuted ? "取消静音" : "静音",
+                            systemImage: preview.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                            symbolSize: 13, hit: 26,
+                            isDisabled: !preview.isReady) {
+                preview.toggleMute()
+            }
             Text(Self.timeText(preview.currentTime))
                 .font(.caption2.monospacedDigit())
-                .frame(width: 34, alignment: .trailing)
             Slider(
                 value: Binding(
                     get: { preview.currentTime },
@@ -328,43 +367,52 @@ struct QuickCutPanel: View {
             .disabled(!preview.isReady || preview.duration <= 0)
             Text(Self.timeText(preview.duration))
                 .font(.caption2.monospacedDigit())
-                .frame(width: 34, alignment: .leading)
-            VaultIconButton(preview.isPlaying ? "暂停" : "播放",
-                            systemImage: preview.isPlaying ? "pause.fill" : "play.fill",
-                            symbolSize: 15, hit: 28,
-                            isDisabled: !preview.isReady) {
-                preview.togglePlay()
-            }
-            VaultIconButton("从头播放", systemImage: "backward.end.fill", symbolSize: 14, hit: 28,
-                            isDisabled: !preview.isReady) {
-                preview.playFromStart()
-            }
-            VaultIconButton(preview.isMuted ? "取消静音" : "静音",
-                            systemImage: preview.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                            symbolSize: 13, hit: 28,
-                            isDisabled: !preview.isReady) {
-                preview.toggleMute()
-            }
         }
     }
 
-    // MARK: - 底部导出设置 + 导出
+    /// 功能操作排（进度条正下方）：自动出片参数 + 清空 + 导出设置
+    private var quickCutRow: some View {
+        HStack(spacing: 8) {
+            Button {
+                autoBuild()
+            } label: {
+                Label("自动出片", systemImage: "wand.and.stars")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(poolAssets.isEmpty)
 
-    private var settingsBar: some View {
-        HStack(spacing: 12) {
+            Stepper(value: $clipSeconds, in: 1...60, step: 1) {
+                Text("每段 \(Int(clipSeconds))s").font(.caption).monospacedDigit()
+            }
+            .frame(width: 100)
+
+            Toggle("仅高评分", isOn: $onlyHighRated)
+                .font(.caption)
+                .controlSize(.small)
+                .help("只从评分 ≥ 4 的素材里选片段")
+
+            Button("清空片段", role: .destructive) { confirmClearSegments = true }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(segments.isEmpty)
+
+            Divider().frame(height: 18)
+
             Picker("画幅", selection: $aspect) {
                 ForEach(QuickCutConfig.Aspect.allCases) { a in
                     Text(a.rawValue).tag(a)
                 }
             }
-            .frame(width: 108)
+            .frame(width: 96)
+            .controlSize(.small)
 
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Text("转场").font(.caption)
-                Slider(value: $transitionSeconds, in: 0...2, step: 0.1).frame(width: 96)
-                Text(transitionSeconds == 0 ? "硬切" : String(format: "%.1fs 溶解", transitionSeconds))
-                    .font(.caption).monospacedDigit()
-                    .frame(width: 74, alignment: .leading)
+                Slider(value: $transitionSeconds, in: 0...2, step: 0.1).frame(width: 76)
+                Text(transitionSeconds == 0 ? "硬切" : String(format: "%.1fs", transitionSeconds))
+                    .font(.caption2).monospacedDigit()
+                    .frame(width: 42, alignment: .leading)
             }
 
             Toggle("背景音乐", isOn: Binding(
@@ -372,6 +420,7 @@ struct QuickCutPanel: View {
                 set: { on in if !on { bgmURL = nil } }
             ))
             .font(.caption)
+            .controlSize(.small)
             Button(bgmURL == nil ? "选择音乐…" : bgmURL!.lastPathComponent) {
                 showBGMImporter = true
             }
@@ -379,7 +428,7 @@ struct QuickCutPanel: View {
             .controlSize(.small)
             .disabled(bgmURL != nil)
             .lineLimit(1)
-            .frame(maxWidth: 170)
+            .frame(maxWidth: 110)
             if bgmURL != nil {
                 Button {
                     bgmURL = nil
@@ -391,7 +440,13 @@ struct QuickCutPanel: View {
             }
 
             Spacer(minLength: 0)
+        }
+    }
 
+    // MARK: - 底部导出条
+
+    private var exportBar: some View {
+        HStack(spacing: 10) {
             Button {
                 exportAll()
             } label: {
@@ -417,6 +472,7 @@ struct QuickCutPanel: View {
                 }
                 .controlSize(.small)
             }
+            Spacer()
         }
     }
 
@@ -464,16 +520,41 @@ struct QuickCutPanel: View {
         return cfg
     }
 
+    /// 按「每段秒数」从一个素材生成默认片段：从 20% 处开始取，跳过无人机起飞/开机的废镜头
+    private func makeSegment(from a: Asset) -> CutSegment {
+        let dur = min(clipSeconds, max(a.durationSeconds, 0.5))
+        let start = min(a.durationSeconds * 0.2, max(a.durationSeconds - dur, 0))
+        return CutSegment(assetID: a.id ?? 0, sourcePath: a.filePath, fileName: a.fileName,
+                          start: start, end: start + dur)
+    }
+
+    /// 素材池拖入的素材落地：插到指定位置，跳过已在列表/非视频的，落地后自动刷新预览
+    private func insertAssets(_ assets: [DraggedAsset], at index: Int) {
+        var added = 0
+        var existingIDs = Set(segments.map(\.assetID))
+        var insertIndex = min(max(index, 0), segments.count)
+        for item in assets {
+            guard let a = appModel.asset(id: item.id) else { continue }
+            guard a.kind == .video else { continue }
+            guard !existingIDs.contains(item.id) else { continue }
+            existingIDs.insert(item.id)
+            segments.insert(makeSegment(from: a), at: insertIndex)
+            insertIndex += 1
+            added += 1
+        }
+        if added > 0 {
+            status = "已加入 \(added) 段（拖入的素材自动排进时间线）"
+            previewError = nil
+            refreshPreview()
+        } else if !assets.isEmpty {
+            status = "拖入的素材已在片段中或不是视频"
+        }
+    }
+
     private func autoBuild() {
         let pool = poolAssets
         guard !pool.isEmpty else { status = "没有可用素材"; return }
-        segments = pool.prefix(40).map { a in
-            let dur = min(clipSeconds, max(a.durationSeconds, 0.5))
-            // 从 20% 处开始取，跳过无人机起飞/开机的废镜头
-            let start = min(a.durationSeconds * 0.2, max(a.durationSeconds - dur, 0))
-            return CutSegment(assetID: a.id ?? 0, sourcePath: a.filePath, fileName: a.fileName,
-                              start: start, end: start + dur)
-        }
+        segments = pool.prefix(40).map { makeSegment(from: $0) }
         status = "已生成 \(segments.count) 段"
         previewError = nil
         refreshPreview()

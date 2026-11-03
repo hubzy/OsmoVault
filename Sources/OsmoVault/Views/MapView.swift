@@ -141,7 +141,7 @@ struct MapView: View {
                     ZStack {
                         // 聚合点垫一层白卡在后面，做出"一叠照片"的效果
                         if cluster.count > 1 {
-                            RoundedRectangle(cornerRadius: 9)
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
                                 .fill(Color.white.opacity(0.9))
                                 .frame(width: size - 8, height: size - 8)
                                 .offset(x: 5, y: 5)
@@ -162,9 +162,9 @@ struct MapView: View {
                                 .frame(width: size, height: size)
                         }
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9)
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .stroke(isSelected ? Color.accentColor : Color.white,
                                     lineWidth: isSelected ? 3 : 2)
                     )
@@ -196,12 +196,10 @@ struct MapView: View {
 
             // 多素材的聚合点右下角标数量
             if cluster.count > 1 {
-                Text("\(cluster.count)")
-                    .font(.caption2).bold().monospacedDigit()
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.black.opacity(0.7)))
-                    .offset(x: 4, y: 3)
+                VaultBadge(vertical: 1, font: .caption2.bold().monospacedDigit()) {
+                    Text("\(cluster.count)")
+                }
+                .offset(x: 4, y: 3)
             }
         }
         // 实况照片按规范在左上角标 LIVE
@@ -444,41 +442,40 @@ struct MapView: View {
     // MARK: - 辅助 UI
 
     private var infoBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "mappin.circle.fill").foregroundStyle(.red)
-            Text("\(assets.count) 个带位置素材")
-                .font(.subheadline)
-            Divider().frame(height: 12)
-            Text("视野内 \(renderedCount) 个 · \(clusters.count) 个位置点")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button {
-                cameraPosition = .region(Self.fitRegion(for: assets))
-            } label: {
-                Label("显示全部", systemImage: "arrow.up.left.and.arrow.down.right")
+        // 改掉 .bar 语义：统一走 14pt continuous + regularMaterial 的玻璃外壳
+        VaultGlassContainer {
+            HStack(spacing: 10) {
+                Image(systemName: "mappin.circle.fill").foregroundStyle(.red)
+                Text("\(assets.count) 个带位置素材")
+                    .font(.subheadline)
+                Divider().frame(height: 12)
+                Text("视野内 \(renderedCount) 个 · \(clusters.count) 个位置点")
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    cameraPosition = .region(Self.fitRegion(for: assets))
+                } label: {
+                    Label("显示全部", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("缩放到全部素材")
             }
-            .buttonStyle(.borderless)
-            .help("缩放到全部素材")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.bar, in: RoundedRectangle(cornerRadius: 8))
-        .padding(12)
+        .padding(16)
     }
 
     private var legend: some View {
-        HStack(spacing: 12) {
-            legendDot(.red, "视频")
-            legendDot(.pink, "实况")
-            legendDot(.blue, "照片")
-            legendDot(.orange, "多素材聚合")
+        VaultGlassContainer {
+            HStack(spacing: 12) {
+                legendDot(.red, "视频")
+                legendDot(.pink, "实况")
+                legendDot(.blue, "照片")
+                legendDot(.orange, "多素材聚合")
+            }
+            .font(.caption2)
         }
-        .font(.caption2)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.bar, in: RoundedRectangle(cornerRadius: 8))
-        .padding(12)
+        .padding(16)
     }
 
     private func legendDot(_ color: Color, _ text: String) -> some View {

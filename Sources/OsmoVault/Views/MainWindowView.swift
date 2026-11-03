@@ -21,7 +21,7 @@ struct MainWindowView: View {
     private var removeMessage: String {
         guard let path = sourceToRemove else { return "" }
         let n = appModel.assets.filter { $0.filePath.hasPrefix(path) }.count
-        return "将移除 \(path) 下的 \(n) 条索引记录，磁盘上的视频文件不会改动。"
+        return "将移除 \(path) 下的 \(n) 条索引记录，磁盘上的视频文件不会改动，但评分、颜色标签、收藏和手动补的定位会一并清除且无法恢复。"
     }
 
     /// 统一按 id 取最新素材：库重载后详情不会停留在旧副本上。
@@ -91,7 +91,7 @@ struct MainWindowView: View {
         }
         // 全屏播放盖住整窗（侧边栏 + 列表 + 详情）。
         // 工具栏的收放走 AppKit 的 `NSToolbar.isVisible`（见 setToolbarHidden），
-        // **不要**用 `.toolbar(.hidden)`：SwiftUI 那个会把 ToolbarItem 真的丢掉，恢复不回来
+        // **不要**改回 SwiftUI 的 toolbar 隐藏 API：那个会把 ToolbarItem 真的丢掉，恢复不回来
         .overlay {
             if isTheater, let asset = selectedAsset {
                 TheaterView(asset: asset, controller: playerController, onExit: exitTheater)
@@ -145,6 +145,7 @@ struct MainWindowView: View {
                 } label: {
                     Label("导入文件夹", systemImage: "plus.square.on.square")
                 }
+                .help("导入一个文件夹，自动扫描其中的照片 / 视频 / 实况照片")
             }
             // 截帧入口统一收到右侧「功能区」，这里不再重复放一个按钮
         }
@@ -197,17 +198,34 @@ struct MainWindowView: View {
                                   onDismiss: { appModel.dismissScanStatus() })
                 }
                 if let msg = appModel.grabStatus {
-                    Text(msg)
-                        .padding(10)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    VaultGlassContainer {
+                        HStack(alignment: .top, spacing: Vault.S.small) {
+                            Text(msg)
+                                .font(.callout)
+                                .lineLimit(3)
+                                .frame(maxWidth: 360, alignment: .leading)
+                            Spacer(minLength: 0)
+                            // grabStatus 是 public @Published，View 层可直接置 nil，不必改 AppModel
+                            VaultIconButton("关闭提示", systemImage: "xmark", hit: 24) {
+                                appModel.grabStatus = nil
+                            }
+                        }
+                    }
                 }
                 if let msg = appModel.autoRefreshStatus {
-                    Label(msg, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.callout)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.regularMaterial, in: Capsule())
-                        .transition(.opacity)
+                    VaultGlassContainer {
+                        HStack(alignment: .top, spacing: Vault.S.small) {
+                            Label(msg, systemImage: "arrow.triangle.2.circlepath")
+                                .font(.callout)
+                                .lineLimit(3)
+                                .frame(maxWidth: 360, alignment: .leading)
+                            Spacer(minLength: 0)
+                            VaultIconButton("关闭提示", systemImage: "xmark", hit: 24) {
+                                appModel.autoRefreshStatus = nil
+                            }
+                        }
+                    }
+                    .transition(.opacity)
                 }
             }
             .padding(.bottom, 8)
@@ -267,7 +285,9 @@ struct MainWindowView: View {
                         onDelete: { deleteAsset(asset.id ?? 0) },
                         onEditLocation: { locationTarget = .single(asset) },
                         isTheater: isTheater,
-                        onToggleTheater: enterTheater
+                        onToggleTheater: enterTheater,
+                        // LocationEditorSheet 打开时禁用裸字母 S，别抢走经纬度输入框的按键
+                        shortcutsEnabled: locationTarget == nil
                     )
                     .onAppear { load(asset) }
                     .onChange(of: asset.id) { _, _ in
@@ -283,6 +303,7 @@ struct MainWindowView: View {
                     }
                     .buttonStyle(.borderless)
                     .help("关闭详情（地图回到整列）")
+                    .accessibilityLabel(Text("关闭详情（地图回到整列）"))
                     .padding(8)
                 }
             }
@@ -364,7 +385,9 @@ struct MainWindowView: View {
                     onDelete: { deleteAsset(asset.id ?? 0) },
                     onEditLocation: { locationTarget = .single(asset) },
                     isTheater: isTheater,
-                    onToggleTheater: enterTheater
+                    onToggleTheater: enterTheater,
+                    // LocationEditorSheet 打开时禁用裸字母 S，别抢走经纬度输入框的按键
+                    shortcutsEnabled: locationTarget == nil
                 )
                 .onAppear { load(asset) }
                 .onChange(of: asset.id) { _, _ in
@@ -424,7 +447,7 @@ struct MainWindowView: View {
 
     /// 全屏播放期间收起窗口工具栏，退出时展开。
     ///
-    /// 必须用 AppKit 的 `NSToolbar.isVisible`：SwiftUI 的 `.toolbar(.hidden)` 会把
+    /// 必须用 AppKit 的 `NSToolbar.isVisible`：SwiftUI 的 toolbar 隐藏 API 会把
     /// `ToolbarItem` 真正从工具栏里丢掉，切回 `.automatic` 也回不来（表现为顶部栏变矮、
     /// 导入/刷新按钮消失）。`isVisible` 只是整体收放，条目一个都不会少。
     private func setToolbarHidden(_ hidden: Bool) {
@@ -434,7 +457,10 @@ struct MainWindowView: View {
 
     private func deleteAsset(_ id: Int64) {
         if selectedAssetID == id { selectedAssetID = nil }
+        // 可恢复操作：保持中性（无 destructive role、无确认），但必须给一条反馈，
+        // 否则素材点了直接消失，用户不知道去哪了。复用 AppModel 既有的底部 Toast 通道。
         appModel.moveToTrash(id: id)
+        appModel.reportGrab("已移入回收站 · 可在回收站恢复")
     }
 
     private func grabFrame() {
@@ -477,39 +503,38 @@ struct ScanStatusBar: View {
     var body: some View {
         switch progress.state {
         case .discovering:
-            Label("正在发现文件…", systemImage: "magnifyingglass")
-                .padding(8).background(.bar, in: RoundedRectangle(cornerRadius: 8))
+            VaultGlassContainer {
+                Label("正在发现文件…", systemImage: "magnifyingglass")
+            }
         case .importing(let indexed, let total):
-            HStack {
-                if let total {
-                    ProgressView(value: Double(indexed) / Double(max(total, 1)))
-                } else {
-                    ProgressView()
+            VaultGlassContainer {
+                HStack {
+                    if let total {
+                        ProgressView(value: Double(indexed) / Double(max(total, 1)))
+                    } else {
+                        ProgressView()
+                    }
+                    Text(progress.currentFile ?? "").lineLimit(1).font(.caption).foregroundStyle(.secondary)
                 }
-                Text(progress.currentFile ?? "").lineLimit(1).font(.caption).foregroundStyle(.secondary)
             }
-            .padding(8).frame(maxWidth: 420).background(.bar, in: RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: 420)
         case .finished(let newAssets, let duplicates, _):
-            HStack(spacing: 10) {
-                Image(systemName: newAssets > 0 ? "checkmark.circle.fill" : "checkmark.circle")
-                    .foregroundStyle(newAssets > 0 ? .green : .secondary)
-                Text(summary(newAssets: newAssets, duplicates: duplicates))
-                if newAssets > 0 {
-                    Divider().frame(height: 14)
-                    Button("只看该文件夹") { onShowFolder() }
-                        .buttonStyle(.borderless)
+            VaultGlassContainer {
+                HStack(spacing: 10) {
+                    Image(systemName: newAssets > 0 ? "checkmark.circle.fill" : "checkmark.circle")
+                        .foregroundStyle(newAssets > 0 ? .green : .secondary)
+                    Text(summary(newAssets: newAssets, duplicates: duplicates))
+                    if newAssets > 0 {
+                        Divider().frame(height: 14)
+                        Button("只看该文件夹") { onShowFolder() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                    VaultIconButton("关闭", systemImage: "xmark", symbolSize: 12, hit: 24) {
+                        onDismiss()
+                    }
                 }
-                Button {
-                    onDismiss()
-                } label: {
-                    Image(systemName: "xmark").font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .help("关闭")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.bar, in: RoundedRectangle(cornerRadius: 8))
         }
     }
 

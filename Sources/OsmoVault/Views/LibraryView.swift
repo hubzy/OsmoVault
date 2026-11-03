@@ -25,6 +25,8 @@ struct LibraryView: View {
     /// 「补定位」页的多选状态。素材补完后会从本页消失，勾选集合跟着清理
     @State private var selectionMode = false
     @State private var checkedIDs: Set<Int64> = []
+    /// 批量移入回收站的二次确认（单条移入是可恢复操作，不确认）
+    @State private var confirmMoveToTrash = false
 
     @State private var sections: [TimelineMonth] = []
     @State private var undated: [Asset] = []
@@ -49,6 +51,19 @@ struct LibraryView: View {
         .onChange(of: title) { _, _ in
             selectionMode = false
             checkedIDs.removeAll()
+            // 换集合时把确认状态一并收掉，避免残留一个指向旧集合的弹窗
+            confirmMoveToTrash = false
+        }
+        .confirmationDialog("移入回收站？", isPresented: $confirmMoveToTrash) {
+            // 中性确认：moveToTrash 只置 isDeleted 标记，行与元数据全留，不是不可逆操作
+            Button("移入回收站 \(checkedIDs.count) 个") {
+                let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+                guard !picked.isEmpty else { return }
+                onDeleteSelected?(picked)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("磁盘文件不会改动，可在回收站逐条恢复")
         }
     }
 
@@ -134,15 +149,15 @@ struct LibraryView: View {
                 .disabled(checkedIDs.isEmpty)
                 .help("只给勾中的 \(checkedIDs.count) 个素材标同一个位置")
             }
-            if let onDeleteSelected {
+            if onDeleteSelected != nil {
+                // L2 中性 + 确认：批量影响面大所以确认，但 moveToTrash 可恢复，不涂红不加 role。
+                // 执行后仍走原来的批量 moveToTrash 逻辑（见 confirmationDialog）
                 Button {
-                    let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
-                    guard !picked.isEmpty else { return }
-                    onDeleteSelected(picked)
+                    confirmMoveToTrash = true
                 } label: {
                     Label("移入回收站 已选 \(checkedIDs.count)", systemImage: "trash")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(checkedIDs.isEmpty)
                 .help("把勾中的 \(checkedIDs.count) 个素材移入回收站")
@@ -639,7 +654,7 @@ private struct RulerStrip: View {
                 // 年份行：每年首月在自己这一列的**上方**标出年份，其余月份留同样高度占位。
                 // 占位保证了所有年份标签在同一条水平线上、柱子底部也仍然对齐
                 yearRow(month: month, isYearStart: isYearStart)
-                RoundedRectangle(cornerRadius: 2)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(month.id == activeMonthID ? Color.accentColor : Color.accentColor.opacity(0.28))
                     // 柱子区域固定高度 + 底部对齐：月份高低不同也不会把年份顶得歪歪扭扭
                     .frame(height: max(3, CGFloat(Double(month.count) / max(peak, 1)) * 24))

@@ -52,7 +52,7 @@ struct DuplicateView: View {
             }
             Button("取消", role: .cancel) { pendingIDs = [] }
         } message: {
-            Text("只删除素材库里的索引记录，磁盘上的视频文件不会改动。")
+            Text("将移除 \(pendingIDs.count) 条索引记录；磁盘文件保留，但评分、颜色标签、收藏和手动补的定位会一并清除且无法恢复")
         }
     }
 
@@ -66,12 +66,15 @@ struct DuplicateView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button {
+            Button(role: .destructive) {
                 pendingIDs = groups.flatMap { appModel.redundantIDs(in: $0) }
                 showConfirm = true
             } label: {
                 Label("清理全部重复", systemImage: "trash")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("移除全部重复索引记录，磁盘文件保留")
             .disabled(redundantCount == 0)
         }
         .padding(.horizontal, 16)
@@ -111,16 +114,18 @@ private struct DuplicateRow: View {
             }
             .buttonStyle(.borderless)
             .help("在访达中显示")
+            .accessibilityLabel(Text("在访达中显示"))
 
             Button(action: onRemove) {
                 Image(systemName: "trash").font(.caption)
             }
             .buttonStyle(.borderless)
             .help("从库中移除这一条")
+            .accessibilityLabel(Text("从库中移除这一条"))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 5))
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
     private func abbreviate(_ path: String) -> String {
@@ -153,11 +158,14 @@ private struct GroupCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button {
+                Button(role: .destructive) {
                     onRemove(redundant)
                 } label: {
                     Text("保留最早，移除其余 \(redundant.count) 个")
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("移除该组多余索引记录，磁盘文件保留")
                 .disabled(redundant.isEmpty)
             }
 
@@ -170,7 +178,7 @@ private struct GroupCard: View {
             }
         }
         .padding(12)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func abbreviate(_ path: String) -> String {

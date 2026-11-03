@@ -59,6 +59,8 @@ struct AssetDetailView: View {
     /// 两处同时渲染会让画面和还原后的详情页都黑掉
     var isTheater: Bool = false
     var onToggleTheater: (() -> Void)?
+    /// LocationEditorSheet 打开时置 false：详情里的裸字母 S 不能抢走经纬度输入框的按键
+    var shortcutsEnabled: Bool = true
 
     /// 播放器还没报告真实尺寸时，先用素材库里记录的宽高兜底
     private var fallbackRatio: CGFloat {
@@ -96,15 +98,19 @@ struct AssetDetailView: View {
 
                     if let onToggleTheater {
                         Button(action: onToggleTheater) {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .padding(6)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                                .contentShape(Rectangle())
+                            // 玻璃只做 HUD 外壳；按钮本体仍是系统 .plain
+                            VaultGlassContainer(radius: Vault.R.media,
+                                                padding: Vault.S.compact,
+                                                material: .ultraThinMaterial) {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .keyboardShortcut(.return, modifiers: .command)
                         .help("全屏播放（⌘↩）")
+                        .accessibilityLabel(Text("全屏播放"))
                         .padding(.top, 16)
                         .padding(.trailing, 10)
                     }
@@ -136,7 +142,8 @@ struct AssetDetailView: View {
                 ActionSection(asset: asset,
                               onGrab: onGrab,
                               onToggleFavorite: onToggleFavorite,
-                              onDelete: onDelete)
+                              onDelete: onDelete,
+                              shortcutsEnabled: shortcutsEnabled)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -197,7 +204,7 @@ private struct PlayerStage: View {
             let fitted = Self.fit(in: geo.size, ratio: ratio)
             LayerPlayerView(player: controller.player)
                 .frame(width: fitted.width, height: fitted.height)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 // 外层给满容器尺寸，内层 frame 自然居中
                 .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -243,7 +250,7 @@ private struct PhotoStage: View {
                 }
             }
             .frame(width: fitted.width, height: fitted.height)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .task(id: asset.id) {
@@ -371,6 +378,7 @@ private struct LivePhotoBar: View {
             }
             .buttonStyle(.borderless)
             .help(playing ? "停止" : "播放实况")
+            .accessibilityLabel(Text(playing ? "停止" : "播放实况"))
             .frame(width: 28)
 
             Text(seconds > 0 ? "实况片段 \(String(format: "%.1f", seconds)) 秒" : "实况片段")
@@ -387,6 +395,7 @@ private struct LivePhotoBar: View {
             }
             .buttonStyle(.borderless)
             .help(controller.liveAudioEnabled ? "关闭实况声音" : "开启实况声音")
+            .accessibilityLabel(Text(controller.liveAudioEnabled ? "关闭实况声音" : "开启实况声音"))
             .frame(width: 26)
         }
         // 离开这张素材时停掉，避免下一条素材继续在后台播
@@ -445,15 +454,11 @@ private struct TransportBar: View {
             }
             icon("backward.frame", "上一帧") { controller.step(frames: -1) }
 
-            Button {
+            VaultIconButton(controller.isPlaying ? "暂停" : "播放",
+                            systemImage: controller.isPlaying ? "pause.fill" : "play.fill",
+                            symbolSize: 15, hit: 26) {
                 controller.togglePlay()
-            } label: {
-                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15))
             }
-            .buttonStyle(.borderless)
-            .help(controller.isPlaying ? "暂停" : "播放")
-            .frame(width: 28)
 
             icon("forward.frame", "下一帧") { controller.step(frames: 1) }
             if !compact {
@@ -462,14 +467,11 @@ private struct TransportBar: View {
 
             Spacer(minLength: 8)
 
-            Button {
+            VaultIconButton(controller.isMuted ? "取消静音" : "静音",
+                            systemImage: controller.volumeIcon,
+                            hit: 26) {
                 controller.toggleMute()
-            } label: {
-                Image(systemName: controller.volumeIcon)
             }
-            .buttonStyle(.borderless)
-            .help(controller.isMuted ? "取消静音" : "静音")
-            .frame(width: 26)
 
             if !dropVolume {
                 Slider(
@@ -502,25 +504,19 @@ private struct TransportBar: View {
             .frame(width: 44)
             .help("播放倍速")
 
-            Button {
+            VaultIconButton(controller.loopEnabled ? "关闭循环" : "开启循环",
+                            systemImage: "repeat",
+                            tint: controller.loopEnabled ? Color.accentColor : nil,
+                            hit: 26) {
                 controller.loopEnabled.toggle()
-            } label: {
-                Image(systemName: "repeat")
-                    .foregroundStyle(controller.loopEnabled ? Color.accentColor : Color.primary)
             }
-            .buttonStyle(.borderless)
-            .help(controller.loopEnabled ? "关闭循环" : "开启循环")
-            .frame(width: 26)
         }
     }
 
+    /// TransportBar 的所有图标按钮一律 hit: 26：保持按钮宽度不变，
+    /// GeometryReader 的 >360 / 300~360 / <300 三档降级阈值不会被撑开
     private func icon(_ system: String, _ help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-        }
-        .buttonStyle(.borderless)
-        .help(help)
-        .frame(width: 26)
+        VaultIconButton(help, systemImage: system, hit: 26, action: action)
     }
 
     private func rateText(_ r: Float) -> String {
@@ -604,6 +600,7 @@ private struct InfoSection: View {
             }
             .buttonStyle(.borderless)
             .help(asset.latitude == nil ? "手动补定位" : "修改定位")
+            .accessibilityLabel(Text(asset.latitude == nil ? "手动补定位" : "修改定位"))
         }
     }
 
@@ -627,6 +624,7 @@ private struct InfoSection: View {
             }
             .buttonStyle(.borderless)
             .help("在访达中显示")
+            .accessibilityLabel(Text("在访达中显示"))
         }
     }
 
@@ -674,6 +672,8 @@ private struct ActionSection: View {
     var onGrab: (() -> Void)?
     var onToggleFavorite: (() -> Void)?
     var onDelete: (() -> Void)?
+    /// LocationEditorSheet 打开时禁用裸字母 S（不改 ⌘S / ⌥S，也不把按钮置灰）
+    var shortcutsEnabled: Bool = true
 
     var body: some View {
         // 图标 + 文字横向排列，整组居中；两侧 Spacer 撑开实现居中
@@ -681,11 +681,13 @@ private struct ActionSection: View {
             Spacer(minLength: 0)
             // 纯照片没有可截的帧，按钮不给出现（S 快捷键也随之失效）
             if asset.kind != .photo {
-                ActionItem(title: "截取实况图", systemImage: "camera.shutter.button", keyEquivalent: "s") {
+                ActionItem(title: "截取实况图", systemImage: "camera.shutter.button",
+                           keyEquivalent: shortcutsEnabled ? "s" : nil) {
                     onGrab?()
                 }
             }
-            ActionItem(title: "在访达中显示", systemImage: "folder") {
+            // 可见标题缩到 5 字避免 64pt 固定框截断；help / VO 仍用标准全称
+            ActionItem(title: "访达中显示", fullTitle: "在访达中显示", systemImage: "folder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: asset.filePath)])
             }
             ActionItem(title: asset.isFavorite ? "取消收藏" : "收藏",
@@ -693,7 +695,8 @@ private struct ActionSection: View {
                        tint: asset.isFavorite ? .pink : nil) {
                 onToggleFavorite?()
             }
-            ActionItem(title: "移到回收站", systemImage: "trash", tint: .red) {
+            // moveToTrash 可恢复：中性色，不加 destructive role、不弹确认
+            ActionItem(title: "移到回收站", systemImage: "trash") {
                 onDelete?()
             }
             Spacer(minLength: 0)
@@ -701,20 +704,27 @@ private struct ActionSection: View {
     }
 }
 
-/// 功能区按钮：图标在上、文字在下，固定宽度保证四个一排时对齐
+/// 功能区按钮：图标在上、文字在下。
+/// 固定 64×46：ActionSection 是 4 按钮 HStack(spacing:6)，4×64+18=274pt < 详情列 minOther 300；
+/// 放大到 72 会变成 4×72+18=306pt，窄列直接挤爆，所以这个数值不能动。
 private struct ActionItem: View {
     let title: String
+    /// help / VoiceOver 用的标准全称（可见标题被缩短时仍读全称）
+    var fullTitle: String? = nil
     let systemImage: String
     /// 传入才注册系统快捷键，避免抢走输入框里的按键
     var keyEquivalent: String?
     var tint: Color?
     let action: () -> Void
 
-    @State private var hovering = false
+    /// 可聚焦元素是外层 Button，焦点状态必须挂在这里；挂在 ButtonStyle 的 label
+    /// 容器上 FKA 下 binding 可能永远不翻，环不出现。
+    @FocusState private var focused: Bool
 
     private var help: String {
-        guard let k = keyEquivalent else { return title }
-        return "\(title) (\(k.uppercased()))"
+        let base = fullTitle ?? title
+        guard let k = keyEquivalent else { return base }
+        return "\(base) (\(k.uppercased()))"   // 保留「截取实况图 (S)」括注
     }
 
     var body: some View {
@@ -726,18 +736,24 @@ private struct ActionItem: View {
                 Text(title)
                     .font(.caption2)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)   // 列被拖窄时允许文字缩小，不挤爆整排
+                    .truncationMode(.tail)
+                // 不再用 minimumScaleFactor：0.8 × 9pt 会缩到 7.2pt，不可读
             }
             .frame(width: 64, height: 46)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(hovering ? Color.primary.opacity(0.10) : Color.primary.opacity(0.05))
-            )
+            .contentShape(Vault.shape(Vault.R.control))
         }
-        .buttonStyle(.plain)
+        // 样式只管 hover / pressed / disabled / fill / 1px 描边，不碰焦点
+        .buttonStyle(VaultActionButtonStyle())
+        .focused($focused)
+        .overlay {
+            // 3pt accent 焦点环：画在 label 外层、10pt continuous 同心、不 clipShape。
+            // 装饰 Shape 必须禁用命中，否则整片盖住按钮点击。
+            Vault.shape(Vault.R.focusRing)
+                .stroke(Color.accentColor.opacity(focused ? 0.9 : 0), lineWidth: 3)
+                .allowsHitTesting(false)
+        }
         .help(help)
-        .onHover { hovering = $0 }
+        .accessibilityLabel(Text(fullTitle ?? title))
         .modifier(ShortcutModifier(keyEquivalent: keyEquivalent))
     }
 }
@@ -855,6 +871,7 @@ struct TheaterView: View {
                 // 兜一道 Esc：onExitCommand 依赖 responder chain，按钮快捷键更稳
                 .keyboardShortcut(.escape, modifiers: [])
                 .help("退出全屏（Esc）")
+                .accessibilityLabel(Text("退出全屏（Esc）"))
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -873,6 +890,9 @@ struct TheaterView: View {
         .environment(\.colorScheme, .dark)
         .foregroundStyle(.white)
         .opacity(controlsVisible ? 1 : 0)
+        // opacity=0 的视图仍参与命中测试；控制条 2.5s 淡出后必须放行，
+        // 否则这条带 Spacer 的 VStack 会拦截 stage 的点击播放/暂停。
+        .allowsHitTesting(controlsVisible)
         .animation(.easeInOut(duration: 0.2), value: controlsVisible)
     }
 
@@ -882,18 +902,16 @@ struct TheaterView: View {
         case .photo:
             EmptyView()
         case .livePhoto:
-            LivePhotoBar(controller: controller, playing: $livePlaying,
-                         seconds: asset.durationSeconds)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-                .frame(maxWidth: 520)
-                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+            VaultGlassContainer {
+                LivePhotoBar(controller: controller, playing: $livePlaying,
+                             seconds: asset.durationSeconds)
+            }
+            .frame(maxWidth: 520)
         case .video:
-            TransportBar(controller: controller)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .frame(maxWidth: 760)
-                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+            VaultGlassContainer {
+                TransportBar(controller: controller)
+            }
+            .frame(maxWidth: 760)
         }
     }
 
@@ -966,6 +984,7 @@ struct LibraryPathBar: View {
                 }
                 .buttonStyle(.borderless)
                 .help("在访达中打开该文件夹")
+                .accessibilityLabel(Text("在访达中打开该文件夹"))
             } else {
                 Text("尚未导入文件夹")
                     .font(.caption)

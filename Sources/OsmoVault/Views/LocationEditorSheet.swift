@@ -65,6 +65,8 @@ struct LocationEditorSheet: View {
     @State private var searchText = ""
     @State private var busy = false
     @State private var hint: String?
+    /// 只有批量清除才需要二次确认
+    @State private var confirmClear = false
 
     /// 没有任何已知坐标时的落点：先给一个能看到全国的范围
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 34.5, longitude: 105.0)
@@ -95,6 +97,15 @@ struct LocationEditorSheet: View {
         .padding(16)
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
+        .confirmationDialog("清除定位？", isPresented: $confirmClear) {
+            Button("清除 \(target.assets.count) 个素材的定位", role: .destructive) {
+                onClear?()
+                dismiss()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将清除 \(target.assets.count) 个素材的定位信息，可在详情页重新补定位")
+        }
     }
 
     // MARK: - 各部分
@@ -126,9 +137,9 @@ struct LocationEditorSheet: View {
             }
             .mapStyle(.standard)
             .frame(height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
             )
             .onTapGesture { point in
@@ -191,11 +202,19 @@ struct LocationEditorSheet: View {
     private var footer: some View {
         HStack {
             if target.hasExistingLocation {
-                Button("清除定位") {
-                    onClear?()
-                    dismiss()
+                if target.isBatch {
+                    // 批量清除影响面大，走二次确认；单条补定位是可逆的，不打断
+                    Button("清除定位", role: .destructive) { confirmClear = true }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                } else {
+                    Button("清除定位", role: .destructive) {
+                        onClear?()
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .foregroundStyle(.red)
             }
             Spacer(minLength: 0)
             Button("取消") { dismiss() }

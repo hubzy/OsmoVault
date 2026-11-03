@@ -15,6 +15,7 @@ struct QuickCutPanel: View {
     @State private var showPool = true
     @State private var progressValue: Double = 0
     @State private var transitionSeconds: Double = 0
+    @State private var confirmClearSegments = false
     @State private var aspect: QuickCutConfig.Aspect = .original
     @State private var clipSeconds: Double = 6
     @State private var onlyHighRated = false
@@ -34,6 +35,13 @@ struct QuickCutPanel: View {
         .padding(16)
         .frame(minWidth: 520)
         .background(FileImporter(isPresented: $showBGMImporter, bgmURL: $bgmURL))
+        // 手调过的起止时间不可一键重建，清空前必须确认
+        .confirmationDialog("清空片段？", isPresented: $confirmClearSegments) {
+            Button("清空 \(segments.count) 段", role: .destructive) { segments.removeAll() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("手动调整过的起止时间不会保留，清空后需要重新「自动出片」生成")
+        }
     }
 
     // MARK: - 分区
@@ -53,7 +61,8 @@ struct QuickCutPanel: View {
             } label: {
                 Label("自动出片", systemImage: "wand.and.stars")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
             .disabled(poolAssets.isEmpty)
 
             Stepper(value: $clipSeconds, in: 1...60, step: 1) {
@@ -65,7 +74,9 @@ struct QuickCutPanel: View {
                 .font(.caption)
 
             Spacer()
-            Button("清空片段") { segments.removeAll() }
+            Button("清空片段", role: .destructive) { confirmClearSegments = true }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(segments.isEmpty)
         }
     }
@@ -104,7 +115,7 @@ struct QuickCutPanel: View {
                 ZStack(alignment: .topTrailing) {
                     AsyncThumbView(asset: asset)
                         .frame(height: 54)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     if asset.rating >= 4 {
                         Image(systemName: "star.fill")
                             .font(.caption2).foregroundStyle(.yellow)
@@ -118,7 +129,7 @@ struct QuickCutPanel: View {
             }
             .padding(4)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(picked ? Color.accentColor : Color.clear, lineWidth: 2)
             )
         }
@@ -134,7 +145,7 @@ struct QuickCutPanel: View {
                 Spacer()
             }
             if segments.isEmpty {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.gray.opacity(0.08))
                     .frame(height: 90)
                     .overlay {
@@ -173,12 +184,13 @@ struct QuickCutPanel: View {
                 }
             }
             Spacer()
-            Button { move(index, by: -1) } label: { Image(systemName: "arrow.up") }
-                .buttonStyle(.borderless).disabled(index == 0)
-            Button { move(index, by: 1) } label: { Image(systemName: "arrow.down") }
-                .buttonStyle(.borderless).disabled(index == segments.count - 1)
-            Button { segments.remove(at: index) } label: { Image(systemName: "xmark.circle") }
-                .buttonStyle(.borderless)
+            VaultIconButton("上移片段", systemImage: "arrow.up", hit: 24,
+                            isDisabled: index == 0) { move(index, by: -1) }
+            VaultIconButton("下移片段", systemImage: "arrow.down", hit: 24,
+                            isDisabled: index == segments.count - 1) { move(index, by: 1) }
+            VaultIconButton("移除片段", systemImage: "xmark.circle", hit: 24) {
+                segments.remove(at: index)
+            }
         }
     }
 

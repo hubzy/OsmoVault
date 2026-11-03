@@ -45,8 +45,8 @@ struct SidebarView: View {
             if !sources.isEmpty {
                 Section("导入来源") {
                     ForEach(sources, id: \.path) { item in
-                        row(icon: "folder", title: folderName(item.path), count: item.count)
-                            .opacity(item.count == 0 ? 0.45 : 1)
+                        row(icon: "folder", title: folderName(item.path), count: item.count,
+                            empty: item.count == 0)
                             .help(sourceHelp(item))
                             .tag(SidebarItem.source(item.path))
                             .contextMenu {
@@ -64,9 +64,9 @@ struct SidebarView: View {
 
             Section("智能相册") {
                 ForEach(albums, id: \.album.id) { item in
-                    row(icon: item.album.systemImage, title: item.album.name, count: item.count)
-                        // 空相册淡化但仍可点，方便先建规则后拍素材
-                        .opacity(item.count == 0 ? 0.4 : 1)
+                    row(icon: item.album.systemImage, title: item.album.name, count: item.count,
+                        empty: item.count == 0)
+                        // 空相册用语义色弱化但仍可点（禁止 .disabled(true)），方便先建规则后拍素材
                         .tag(SidebarItem.smartAlbum(item.album.id))
                 }
             }
@@ -84,8 +84,8 @@ struct SidebarView: View {
                 row(icon: "scissors", title: "一键出片")
                     .tag(SidebarItem.quickCut)
                 // 同一段视频被从两个路径导入后没法区分，这里集中处理
-                row(icon: "doc.on.doc", title: "重复素材", count: duplicateCount)
-                    .opacity(duplicateCount == 0 ? 0.45 : 1)
+                row(icon: "doc.on.doc", title: "重复素材", count: duplicateCount,
+                    empty: duplicateCount == 0)
                     .tag(SidebarItem.duplicates)
                 row(icon: "trash", title: "回收站")
                     .tag(SidebarItem.trash)
@@ -108,18 +108,39 @@ struct SidebarView: View {
         return lines.joined(separator: "\n")
     }
 
-    private func row(icon: String, title: String, count: Int? = nil) -> some View {
+    /// 空集合用语义色（.secondary / .primary）表达，不再用 .opacity 整体压暗：
+    /// 整体透明度会连带把「选中行白字」也压成灰白，对比度直接不达标。
+    /// 只给图标与计数上色，标题保持动态色（选中时由 List 自动切成白字）。
+    private func row(icon: String, title: String, count: Int? = nil, empty: Bool = false) -> some View {
         HStack(spacing: 6) {
-            Label(title, systemImage: icon)
-                .lineLimit(1)
+            Label {
+                Text(title).lineLimit(1)
+            } icon: {
+                Image(systemName: icon)
+                    .modifier(EmptyEmphasis(empty: empty))
+            }
             Spacer(minLength: 4)
             if let count {
                 Text("\(count)")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .modifier(EmptyEmphasis(empty: empty))
             }
         }
         // 整行可点：不加 contentShape 时只有文字那一小条能响应点击，右侧空白点了没反应
         .contentShape(Rectangle())
+    }
+}
+
+/// .primary / .secondary 是层级形状样式，会跟随 List 选中行的前景色自适应，
+/// 不会像 Color.primary 那样把选中行白字覆盖成深色。
+private struct EmptyEmphasis: ViewModifier {
+    let empty: Bool
+
+    func body(content: Content) -> some View {
+        if empty {
+            content.foregroundStyle(.secondary)
+        } else {
+            content.foregroundStyle(.primary)
+        }
     }
 }

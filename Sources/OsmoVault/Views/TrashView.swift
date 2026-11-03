@@ -42,10 +42,10 @@ struct TrashView: View {
         }
         .overlay(alignment: .bottom) {
             if let status {
-                Text(status)
-                    .padding(10)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.bottom, 10)
+                VaultGlassContainer {
+                    Text(status).font(.callout)
+                }
+                .padding(.bottom, 10)
             }
         }
     }
@@ -156,25 +156,22 @@ private struct TrashCard: View {
                     .frame(height: 130)
                     .frame(maxWidth: .infinity)
                     .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                     )
 
-                HStack(spacing: 4) {
-                    Image(systemName: asset.kind == .video ? "video.fill"
-                          : asset.kind == .livePhoto ? "livephoto" : "photo")
-                        .font(.caption2)
-                        .foregroundStyle(.white)
-                    if asset.kind != .photo {
-                        Text(AssetCell.durationText(asset.durationSeconds))
-                            .font(.caption2).monospacedDigit()
-                            .foregroundStyle(.white)
+                VaultBadge {
+                    HStack(spacing: 4) {
+                        Image(systemName: asset.kind == .video ? "video.fill"
+                              : asset.kind == .livePhoto ? "livephoto" : "photo")
+                            .font(.caption2)
+                        if asset.kind != .photo {
+                            Text(AssetCell.durationText(asset.durationSeconds))
+                        }
                     }
                 }
-                .padding(.horizontal, 5).padding(.vertical, 2)
-                .background(.black.opacity(0.55), in: Capsule())
                 .padding(6)
             }
             .overlay(alignment: .topTrailing) {
@@ -185,7 +182,9 @@ private struct TrashCard: View {
                             .shadow(radius: 2)
                     }
                     .buttonStyle(.plain)
-                    .help("彻底删除")
+                    // hover-only：不套 VaultIconButton、不加 .help / accessibilityLabel。
+                    // 常驻等价入口是卡片下方 L3 的「删除」按钮
+                    .accessibilityHidden(true)
                     .padding(6)
                 }
             }
@@ -202,14 +201,14 @@ private struct TrashCard: View {
                 Button("恢复", action: onRestore)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                Button("删除") { onPurge() }
+                Button("删除", role: .destructive) { onPurge() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Spacer(minLength: 0)
             }
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .onHover { isHovered = $0 }
     }
 

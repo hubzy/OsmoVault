@@ -62,6 +62,12 @@ struct AssetGridView: View {
                     Button(asset.isFavorite ? "取消收藏" : "收藏") {
                         onToggleFavorite?(id)
                     }
+                    // 评分键盘等价路径：网格里的星标是 onTapGesture，不可聚焦
+                    Menu("评分") {
+                        ForEach(0...5, id: \.self) { r in
+                            Button(r == 0 ? "清除评分" : "\(r) 星") { onRate(id, r) }
+                        }
+                    }
                     Button("移到回收站") { onDelete?(id) }
                 }
         }
@@ -149,6 +155,7 @@ struct AssetCell: View {
             infoArea
         }
         .contentShape(Rectangle())
+        .accessibilityValue(Text(checked ? "已勾选" : ""))
         .onHover { hovering in
             isHovered = hovering
             hoverTask?.cancel()
@@ -199,34 +206,31 @@ struct AssetCell: View {
                 .frame(height: mediaHeight)
                 .frame(maxWidth: .infinity)
                 .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(Vault.shape(Vault.R.media))
+                // 单选 = 仅 2pt accent 描边、无填充；
+                // 勾选 = 0.18 accent 填充 + 右上角徽章，不画 accent 描边。两者可叠加
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(checked ? Color.accentColor : (isSelected ? Color.accentColor : Color.clear),
-                                lineWidth: checked ? 3 : 2)
+                    Vault.shape(Vault.R.media)
+                        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
                 )
 
             // 照片没有时长，改标类型；视频/实况标时长（实况另加一个角标记号）
-            HStack(spacing: 4) {
-                if asset.kind == .livePhoto {
-                    Image(systemName: "livephoto")
-                        .font(.caption2)
-                        .foregroundStyle(.white)
-                        .help("实况照片")
-                }
-                if asset.kind == .photo {
-                    Image(systemName: "photo")
-                        .font(.caption2)
-                        .foregroundStyle(.white)
-                        .help("照片")
-                } else {
-                    Text(Self.durationText(asset.durationSeconds))
-                        .font(.caption2).monospacedDigit()
-                        .foregroundStyle(.white)
+            VaultBadge {
+                HStack(spacing: 4) {
+                    if asset.kind == .livePhoto {
+                        Image(systemName: "livephoto")
+                            .font(.caption2)
+                            .help("实况照片")
+                    }
+                    if asset.kind == .photo {
+                        Image(systemName: "photo")
+                            .font(.caption2)
+                            .help("照片")
+                    } else {
+                        Text(Self.durationText(asset.durationSeconds))
+                    }
                 }
             }
-            .padding(.horizontal, 5).padding(.vertical, 2)
-            .background(.black.opacity(0.55), in: Capsule())
             .padding(6)
         }
         .overlay(alignment: .topTrailing) {
@@ -246,6 +250,9 @@ struct AssetCell: View {
                         .shadow(radius: 2)
                 }
                 .buttonStyle(.plain)
+                // hover-only：不套 VaultIconButton、不加 .help（否则 8000 个 cell 全进 VO / Tab 顺序）。
+                // 常驻等价入口已在 contextMenu 的「收藏」里
+                .accessibilityHidden(true)
                 .padding(6)
             }
         }
@@ -307,7 +314,7 @@ struct AssetCell: View {
                     Image(systemName: "mappin").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
-                RatingControl(rating: asset.rating, onChange: onRate)
+                CompactRatingControl(rating: asset.rating, onChange: onRate)
                     .controlSize(.mini)
             }
         }

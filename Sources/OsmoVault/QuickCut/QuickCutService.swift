@@ -51,6 +51,23 @@ enum QuickCutError: LocalizedError {
     }
 }
 
+/// 一条构建好的时间线。`export` 与预览播放器共用同一份，保证「预览即所得」
+struct PreparedTimeline {
+    let composition: AVMutableComposition
+    let videoComposition: AVMutableVideoComposition
+    let audioMix: AVAudioMix?
+    let total: CMTime
+    let renderSize: CGSize
+    /// 每段在时间轴上的起点（已含转场重叠偏移），预览跳段用
+    let segmentStarts: [CMTime]
+
+    /// 预览画面的宽高比：横屏宽撑满，竖屏按高撑满
+    var renderRatio: CGFloat {
+        let w = max(renderSize.width, 1), h = max(renderSize.height, 1)
+        return w / h
+    }
+}
+
 enum QuickCutService {
     private struct Source {
         let asset: AVURLAsset
@@ -59,9 +76,8 @@ enum QuickCutService {
         let mediaRange: CMTimeRange
     }
 
-    /// 将片段按顺序拼接，导出到目标 URL（mp4）
-    static func export(segments: [CutSegment], config: QuickCutConfig, to output: URL,
-                       progress: ((Double) -> Void)? = nil) async throws {
+    /// 将片段按顺序拼成时间线（导出、预览共用，保证两边效果一致）
+    static func prepare(segments: [CutSegment], config: QuickCutConfig) throws -> PreparedTimeline {
         guard !segments.isEmpty else { throw QuickCutError.empty }
 
         // 1. 解析源素材，并把用户填的起止时间夹到真实时长范围内
@@ -189,14 +205,28 @@ enum QuickCutService {
             }
         }
 
-        // 6. 导出
-        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+        return PreparedTimeline(composition: composition,
+                                videoComposition: vc,
+                                audioMix: exportAudioMix,
+                                total: total,
+                                renderSize: renderSize,
+                                segmentStarts: positions)
+    }
+
+    /// 把拼好的时间线导出到目标 URL（mp4）
+    static func export(segments: [CutSegment], config: QuickCutConfig, to output: URL,
+                       progress: ((Double) -> Void)? = nil) async throws {
+        guard !segments.isEmpty else { throw QuickCutError.empty }
+        let timeline = try prepare(segments: segments, config: config)
+
+        guard let export = AVAssetExportSession(asset: timeline.composition,
+                                                presetName: AVAssetExportPresetHighestQuality) else {
             throw QuickCutError.noExportSession
         }
         export.outputURL = output
         export.outputFileType = .mp4
-        export.videoComposition = vc
-        export.audioMix = exportAudioMix
+        export.videoComposition = timeline.videoComposition
+        export.audioMix = timeline.audioMix
         export.shouldOptimizeForNetworkUse = true
         export.canPerformMultiplePassesOverSourceMediaData = true
 

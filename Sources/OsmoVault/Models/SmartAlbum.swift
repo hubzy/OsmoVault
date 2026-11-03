@@ -50,7 +50,7 @@ struct SmartAlbum: Identifiable, Hashable {
             },
             SmartAlbum(id: "highFps", name: "高帧率", systemImage: "speedometer") { $0.frameRate >= 50 },
             // 这一页就是「补定位」页：只有缺定位的素材，且只有这一页能做批量补定位
-            SmartAlbum(id: "noGPS", name: "补定位", systemImage: "mappin.slash.circle") { $0.latitude == nil },
+            SmartAlbum(id: "noGPS", name: "无定位", systemImage: "mappin.slash.circle") { $0.latitude == nil },
             // 颜色标签相册：侧边栏图标按 macOS 规范显示对应色（红橙绿蓝 = colorLabel 1-4）
             SmartAlbum(id: "labelRed", name: "红色标签", systemImage: "circle.fill", tint: .red) { $0.colorLabel == 1 },
             SmartAlbum(id: "labelOrange", name: "橙色标签", systemImage: "circle.fill", tint: .orange) { $0.colorLabel == 2 },

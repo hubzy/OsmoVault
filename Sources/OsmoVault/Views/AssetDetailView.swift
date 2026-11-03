@@ -54,6 +54,11 @@ struct AssetDetailView: View {
     var onDelete: (() -> Void)?
     /// 手动补定位（没有 GPS 的素材也能在地图上找到）
     var onEditLocation: (() -> Void)?
+    /// 正在全屏播放。**必须为 true 时把画面区从视图树里移掉**：
+    /// 一个 AVPlayer 同时只能挂一个 AVPlayerLayer（后挂的赢，前一个直接变黑），
+    /// 两处同时渲染会让画面和还原后的详情页都黑掉
+    var isTheater: Bool = false
+    var onToggleTheater: (() -> Void)?
 
     /// 播放器还没报告真实尺寸时，先用素材库里记录的宽高兜底
     private var fallbackRatio: CGFloat {
@@ -81,10 +86,30 @@ struct AssetDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 画面区：吃掉剩余空间，窄窗口下也不低于 160
-            stage
-                .frame(minHeight: 160)
-                .padding(.vertical, 8)
+            // 画面区：吃掉剩余空间，窄窗口下也不低于 160。
+            // 全屏播放期间整块让位（见 isTheater 的注释），退出全屏后重新创建、重新 attach
+            if !isTheater {
+                ZStack(alignment: .topTrailing) {
+                    stage
+                        .frame(minHeight: 160)
+                        .padding(.vertical, 8)
+
+                    if let onToggleTheater {
+                        Button(action: onToggleTheater) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .help("全屏播放（⌘↩）")
+                        .padding(.top, 16)
+                        .padding(.trailing, 10)
+                    }
+                }
+            }
 
             Divider()
 
@@ -726,6 +751,185 @@ private struct ShortcutModifier: ViewModifier {
             content.keyboardShortcut(KeyEquivalent(first), modifiers: [])
         } else {
             content
+        }
+    }
+}
+
+// MARK: - 全屏播放
+
+/// 窗口级全屏播放：盖住侧边栏与详情，只留画面 + 悬浮控制条。
+///
+/// 只在这里渲染 `PlayerStage`（即唯一的 AVPlayerLayer），详情里的画面区由
+/// `AssetDetailView.isTheater` 移出视图树 —— 两处同时挂同一个 AVPlayer 会互相抢图层。
+struct TheaterView: View {
+    let asset: Asset
+    let controller: PlayerController
+    var onExit: () -> Void
+
+    /// 实况照片在全屏里是否播放动态片段
+    @State private var livePlaying = false
+    /// 控制条自动隐藏：鼠标一动就出来，播放中 2.5s 没动静就淡出
+    @State private var controlsVisible = true
+    @State private var hideTask: Task<Void, Never>?
+
+    private var fallbackRatio: CGFloat {
+        let w = CGFloat(asset.width), h = CGFloat(asset.height)
+        guard w > 0, h > 0 else { return 16.0 / 9.0 }
+        return w / h
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            stage
+            controls
+        }
+        .ignoresSafeArea()
+        .onContinuousHover { phase in
+            if case .active = phase { showControls() }
+        }
+        // Esc 退出。窗口被拖出原生全屏时 MainWindowView 也会兜一道
+        .onExitCommand(perform: onExit)
+        .onAppear(perform: showControls)
+        .onDisappear(perform: stopAll)
+        // 用方向键换素材时，上一条的实况播放态不要带过来
+        .onChange(of: asset.id) { _, _ in
+            livePlaying = false
+            showControls()
+        }
+    }
+
+    // MARK: 画面
+
+    @ViewBuilder
+    private var stage: some View {
+        switch asset.kind {
+        case .video:
+            PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+                .contentShape(Rectangle())
+                .onTapGesture { controller.togglePlay() }
+        case .photo:
+            PhotoStage(asset: asset)
+        case .livePhoto:
+            ZStack {
+                PhotoStage(asset: asset)
+                if livePlaying {
+                    PlayerStage(controller: controller, fallbackRatio: fallbackRatio)
+                } else {
+                    // 全屏里没有「悬停播放」的语境，给一个明确的播放入口
+                    Button(action: startLive) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 64))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white.opacity(0.92), .black.opacity(0.35))
+                            .shadow(radius: 12)
+                    }
+                    .buttonStyle(.plain)
+                    .help("播放实况")
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { livePlaying ? stopLive() : startLive() }
+        }
+    }
+
+    // MARK: 控制条
+
+    private var controls: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text(asset.fileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.white)
+                Spacer(minLength: 8)
+                Button(action: onExit) {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                // 兜一道 Esc：onExitCommand 依赖 responder chain，按钮快捷键更稳
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("退出全屏（Esc）")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(
+                LinearGradient(colors: [.black.opacity(0.65), .clear],
+                               startPoint: .top, endPoint: .bottom)
+            )
+
+            Spacer(minLength: 0)
+
+            bottomBar
+                .padding(.horizontal, 22)
+                .padding(.bottom, 24)
+        }
+        // 深色画面上必须走暗色配色，否则浅色主题下控制条文字是黑的、看不见
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(.white)
+        .opacity(controlsVisible ? 1 : 0)
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+    }
+
+    @ViewBuilder
+    private var bottomBar: some View {
+        switch asset.kind {
+        case .photo:
+            EmptyView()
+        case .livePhoto:
+            LivePhotoBar(controller: controller, playing: $livePlaying,
+                         seconds: asset.durationSeconds)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+                .frame(maxWidth: 520)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        case .video:
+            TransportBar(controller: controller)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                .frame(maxWidth: 760)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    // MARK: 行为
+
+    private func showControls() {
+        controlsVisible = true
+        hideTask?.cancel()
+        // 照片没有控制条，别让「自动隐藏」把标题也一起藏了
+        guard asset.kind != .photo else { return }
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            // 暂停状态保留控制条：用户多半正要操作
+            guard controller.isPlaying || livePlaying else { return }
+            controlsVisible = false
+        }
+    }
+
+    private func startLive() {
+        guard !livePlaying else { return }
+        livePlaying = true
+        controller.syncLiveAudio()
+        controller.playFromStart()
+    }
+
+    private func stopLive() {
+        livePlaying = false
+        controller.pause()
+    }
+
+    private func stopAll() {
+        hideTask?.cancel()
+        if livePlaying {
+            livePlaying = false
+            controller.pause()
         }
     }
 }

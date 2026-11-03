@@ -14,9 +14,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var importHistory: [ImportRecord] = []
     /// 「截取实况图」的结果提示，由 MainWindowView 显示
     @Published var grabStatus: String?
+    /// 自动刷新（监听文件夹）的结果提示，几秒后自己消失
+    @Published var autoRefreshStatus: String?
 
     let database: AppDatabase
     private var placeNameTask: Task<Void, Never>?
+    /// 已导入文件夹的实时监听：有新照片/视频落盘就自动增量扫描
+    private var watcher: FolderWatcher?
+    private var autoRefreshStatusTask: Task<Void, Never>?
+    private var lastAutoScanAt = Date.distantPast
     /// 手动补定位后的地名反查，与扫描期的地名任务分开，互不取消
     private var manualPlaceTask: Task<Void, Never>?
     private static let rootsKey = "OsmoVault.scanRoots"
@@ -32,6 +38,8 @@ final class AppModel: ObservableObject {
         self.scanRoots = UserDefaults.standard.stringArray(forKey: Self.rootsKey) ?? []
         self.importHistory = Self.loadHistory()
         reloadAssets()
+        // 启动就开始盯着已导入的文件夹：往里丢照片不用再手动导入一次
+        startWatching()
         // 老版本会把每张实况照片的动态视频都抽出来落盘，几千张能攒到几十 GB，
         // 而且新代码会直接复用已有文件、不会主动缩。启动时按配额清一次。
         Task.detached(priority: .background) {
@@ -81,6 +89,88 @@ final class AppModel: ObservableObject {
         roots.insert(path, at: 0)
         scanRoots = roots
         UserDefaults.standard.set(roots, forKey: Self.rootsKey)
+        startWatching()
+    }
+
+    // MARK: - 自动刷新（监听文件夹）
+
+    /// 监听「导入来源」。老库可能没有 scanRoots（升级前导入的），
+    /// 这时退回从素材路径反推出的目录，否则那些文件夹里的新增内容永远发现不了
+    private func startWatching() {
+        let roots = scanRoots.isEmpty ? libraryRoots : scanRoots
+        if watcher == nil {
+            watcher = FolderWatcher { [weak self] in
+                Task { @MainActor in self?.autoRescan() }
+            }
+        }
+        watcher?.update(roots: roots)
+    }
+
+    /// 手动点「重新扫描」：忽略冷却时间，并且没新素材时也给个反馈
+    func refreshNow() {
+        autoRescan(force: true)
+    }
+
+    /// 回到前台时补一次：睡眠期间的事件可能漏掉，外接盘拔插后
+    /// FSEvents 也不一定能自己恢复（卷重挂会换设备节点）
+    func applicationDidBecomeActive() {
+        startWatching()
+        autoRescan()
+    }
+
+    /// 增量扫描所有来源。和 `scanFolder` 的区别：
+    /// 不写导入历史、不弹「导入完成」结果条——它可能一天触发几十次，写历史会把真正的导入记录冲掉
+    func autoRescan(force: Bool = false) {
+        guard !isScanning else { return }
+        let roots = scanRoots.isEmpty ? libraryRoots : scanRoots
+        guard !roots.isEmpty else { return }
+        // 冷却：一次大量拷贝会触发多轮事件，扫完再被叫起来没有意义
+        let now = Date()
+        if !force, now.timeIntervalSince(lastAutoScanAt) < 20 { return }
+        lastAutoScanAt = now
+
+        isScanning = true
+        Task { [weak self] in
+            guard let self else { return }
+            var added = 0
+            var hitRoot: String?
+
+            for root in roots {
+                // 外接盘/网络盘可能已经拔了：跳过，别把它当成"这个目录空了"
+                guard Self.isDirectory(root) else { continue }
+                let scanner = MediaScanner(database: self.database)
+                for await progress in scanner.scan(folder: URL(fileURLWithPath: root)) {
+                    if case .finished(let newAssets, _, let ids) = progress.state {
+                        added += newAssets
+                        if !ids.isEmpty, hitRoot == nil { hitRoot = root }
+                    }
+                }
+            }
+
+            self.isScanning = false
+            guard added > 0 else {
+                if force { self.showAutoStatus("已是最新，没有发现新素材") }
+                return
+            }
+            self.reloadAssets()
+            self.resolveMissingPlaceNames()
+            let folder = hitRoot.map { "「\(URL(fileURLWithPath: $0).lastPathComponent)」" } ?? ""
+            self.showAutoStatus("\(folder)自动发现 \(added) 个新素材")
+        }
+    }
+
+    private static func isDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    private func showAutoStatus(_ text: String) {
+        autoRefreshStatus = text
+        autoRefreshStatusTask?.cancel()
+        autoRefreshStatusTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            self?.autoRefreshStatus = nil
+        }
     }
 
     /// 某个来源文件夹最近一次导入的时间，菜单/提示里显示
@@ -425,6 +515,7 @@ final class AppModel: ObservableObject {
         removeAssets(ids: ids)
         scanRoots.removeAll { $0 == path }
         UserDefaults.standard.set(scanRoots, forKey: Self.rootsKey)
+        startWatching()
         return ids.count
     }
 

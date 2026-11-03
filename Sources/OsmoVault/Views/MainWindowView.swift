@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AppKit
 
 struct MainWindowView: View {
     @EnvironmentObject var appModel: AppModel
@@ -11,6 +12,10 @@ struct MainWindowView: View {
     @State private var sourceToRemove: String?
     /// 手动补定位（单个 / 批量）
     @State private var locationTarget: LocationEditTarget?
+    /// 全屏播放：盖住整个窗口内容，同时把窗口推进原生全屏
+    @State private var isTheater = false
+    /// 标记「全屏是这次点进来的」，退出时才由我们负责还原窗口（用户自己按过绿灯就不动）
+    @State private var theaterOwnsWindowFullScreen = false
     // 两列宽度在 ResizableSplit 内部用 @AppStorage 管理，这里不再持有
 
     private var removeMessage: String {
@@ -84,6 +89,31 @@ struct MainWindowView: View {
                 }
             }
         }
+        // 全屏播放盖住整窗（侧边栏 + 列表 + 详情）。
+        // 工具栏的收放走 AppKit 的 `NSToolbar.isVisible`（见 setToolbarHidden），
+        // **不要**用 `.toolbar(.hidden)`：SwiftUI 那个会把 ToolbarItem 真的丢掉，恢复不回来
+        .overlay {
+            if isTheater, let asset = selectedAsset {
+                TheaterView(asset: asset, controller: playerController, onExit: exitTheater)
+                    .transition(.opacity)
+            }
+        }
+        // 素材被删掉 / 取消选中时，全屏没有内容可播了，必须退出来
+        .onChange(of: selectedAssetID) { _, newValue in
+            if newValue == nil, isTheater { exitTheater() }
+        }
+        // 全屏动画走完再收工具栏：动画期间窗口会重建标题栏，提前改会被覆盖
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            if isTheater { setToolbarHidden(true) }
+        }
+        // 用户自己按绿灯 / ⌃⌘F 离开原生全屏时同步退出全屏播放，并把工具栏还回去
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            setToolbarHidden(false)
+            if isTheater {
+                theaterOwnsWindowFullScreen = false
+                isTheater = false
+            }
+        }
         // 换页面时先把声音收掉：详情面板可能已经整体不在了（地图 / 回收站 / 一键出片 / 重复素材）。
         // AVPlayer 独立于视图，光靠视图消失并不会停；这里再兜一道，切页必定静音
         .onChange(of: section) { _, newValue in
@@ -96,7 +126,19 @@ struct MainWindowView: View {
                 playerController.pause()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            appModel.applicationDidBecomeActive()
+        }
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    appModel.refreshNow()
+                } label: {
+                    Label("重新扫描", systemImage: "arrow.clockwise")
+                }
+                .disabled(appModel.isScanning)
+                .help("重新扫描已导入的文件夹。往文件夹里新增照片会自动发现，这里用于手动补一次")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showImporter = true
@@ -159,6 +201,14 @@ struct MainWindowView: View {
                         .padding(10)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
+                if let msg = appModel.autoRefreshStatus {
+                    Label(msg, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.callout)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                        .transition(.opacity)
+                }
             }
             .padding(.bottom, 8)
         }
@@ -215,7 +265,9 @@ struct MainWindowView: View {
                         onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
                         onGrab: grabFrame,
                         onDelete: { deleteAsset(asset.id ?? 0) },
-                        onEditLocation: { locationTarget = .single(asset) }
+                        onEditLocation: { locationTarget = .single(asset) },
+                        isTheater: isTheater,
+                        onToggleTheater: enterTheater
                     )
                     .onAppear { load(asset) }
                     .onChange(of: asset.id) { _, _ in
@@ -310,7 +362,9 @@ struct MainWindowView: View {
                     onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
                     onGrab: grabFrame,
                     onDelete: { deleteAsset(asset.id ?? 0) },
-                    onEditLocation: { locationTarget = .single(asset) }
+                    onEditLocation: { locationTarget = .single(asset) },
+                    isTheater: isTheater,
+                    onToggleTheater: enterTheater
                 )
                 .onAppear { load(asset) }
                 .onChange(of: asset.id) { _, _ in
@@ -339,6 +393,44 @@ struct MainWindowView: View {
     }
 
     // MARK: - 操作
+
+    // MARK: - 全屏播放
+
+    private func enterTheater() {
+        guard selectedAsset != nil, !isTheater else { return }
+        isTheater = true
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        if window.styleMask.contains(.fullScreen) {
+            // 本来就在全屏里：不会再有 didEnterFullScreen 通知，直接把工具栏收掉
+            setToolbarHidden(true)
+        } else {
+            theaterOwnsWindowFullScreen = true
+            window.toggleFullScreen(nil)   // 动画结束后由 didEnterFullScreen 收工具栏
+        }
+    }
+
+    private func exitTheater() {
+        guard isTheater else { return }
+        // 只有"是我们推进去的"才由我们还原；用户本来就在全屏里就别乱动
+        let restore = theaterOwnsWindowFullScreen
+        theaterOwnsWindowFullScreen = false
+        isTheater = false
+        setToolbarHidden(false)
+        if restore, let window = NSApp.keyWindow ?? NSApp.mainWindow,
+           window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        }
+    }
+
+    /// 全屏播放期间收起窗口工具栏，退出时展开。
+    ///
+    /// 必须用 AppKit 的 `NSToolbar.isVisible`：SwiftUI 的 `.toolbar(.hidden)` 会把
+    /// `ToolbarItem` 真正从工具栏里丢掉，切回 `.automatic` 也回不来（表现为顶部栏变矮、
+    /// 导入/刷新按钮消失）。`isVisible` 只是整体收放，条目一个都不会少。
+    private func setToolbarHidden(_ hidden: Bool) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        window.toolbar?.isVisible = !hidden
+    }
 
     private func deleteAsset(_ id: Int64) {
         if selectedAssetID == id { selectedAssetID = nil }

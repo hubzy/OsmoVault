@@ -287,11 +287,12 @@ struct AssetCell: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            // 实况照片按规范在左上角标 LIVE；非实况才在悬停起播时显示播放指示
+            // 实况照片按规范在左上角标 LIVE；视频/实况悬停起播才显示播放指示，
+            // 纯照片没有可播内容（playbackPath 为 nil），hover 不出现 play 图标
             if asset.kind == .livePhoto {
                 LiveBadge(compact: true)
                     .padding(5)
-            } else if isHovered && previewOn {
+            } else if isHovered && previewOn, asset.kind.isPlayable {
                 Image(systemName: "play.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.white)

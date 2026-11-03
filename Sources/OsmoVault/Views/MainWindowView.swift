@@ -330,8 +330,7 @@ struct MainWindowView: View {
             if let album = SmartAlbum.find(id: id) {
                 library(album.filter(appModel.assets),
                         title: album.name,
-                        hint: "「\(album.name)」里还没有素材",
-                        isLocationPage: id == "noGPS")
+                        hint: "「\(album.name)」里还没有素材")
             } else {
                 placeholder("相册不存在")
             }
@@ -350,20 +349,19 @@ struct MainWindowView: View {
 
     /// 图库页：网格与时间轴合并在一起，顶部统一显示总数
     private func library(_ assets: [Asset], title: String = "图库",
-                         hint: String? = nil, isLocationPage: Bool = false) -> some View {
+                         hint: String? = nil) -> some View {
         LibraryView(title: title, assets: assets, version: appModel.assetsVersion,
                     selectedAssetID: $selectedAssetID,
                     onRate: { appModel.setRating(id: $0, rating: $1) },
                     onDelete: deleteAsset,
                     onToggleFavorite: { appModel.toggleFavorite(id: $0) },
                     onVisible: { appModel.noteVisible($0) },
-                    isLocationPage: isLocationPage,
-                    // 「补定位」按钮只在补定位页挂，其他页面不再冒出「补定位 N」按钮。
+                    // 批量补定位：每个页面都能多选后统一补/改定位。
                     // 单条走 .single：LocationEditorSheet 能回显已有坐标/地名；
                     // 多条才是 .batch（批量没有"已有坐标"的概念）
-                    onAssignLocation: isLocationPage ? { list in
+                    onAssignLocation: { list in
                         locationTarget = list.count == 1 ? .single(list[0]) : .batch(list)
-                    } : nil,
+                    },
                     // 右键补定位：**所有页面**都可用——有定位选「修改定位」，没有选「补定位」
                     onLocateItem: { id in
                         guard let a = appModel.asset(id: id) else { return }

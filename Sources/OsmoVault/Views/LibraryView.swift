@@ -14,9 +14,7 @@ struct LibraryView: View {
     var onToggleFavorite: ((Int64) -> Void)?
     /// 卡片滚进可视区时回调，用于按需生成缩略图
     var onVisible: ((Int64) -> Void)?
-    /// 只有「补定位」页才提供批量补定位入口，其他页面不放这个按钮
-    var isLocationPage = false
-    /// 批量补定位：把**用户勾选**的那些素材交给调用方（补定位页的按钮与右键批量都走这里）
+    /// 批量补定位：把**用户勾选**的那些素材交给调用方（多选工具栏与右键批量都走这里）
     var onAssignLocation: (([Asset]) -> Void)?
     /// 右键补定位的**单条**通道：所有页面都可用（有定位=修改，没定位=添加）
     var onLocateItem: ((Int64) -> Void)?
@@ -29,6 +27,16 @@ struct LibraryView: View {
     @State private var checkedIDs: Set<Int64> = []
     /// 批量移入回收站的二次确认（单条移入是可恢复操作，不确认）
     @State private var confirmMoveToTrash = false
+
+    /// 当前勾选的素材（工具栏批量操作共用）
+    private var pickedAssets: [Asset] {
+        assets.filter { checkedIDs.contains($0.id ?? -1) }
+    }
+
+    /// 勾选集全部已有定位时，批量按钮显示「修改定位」而不是「补定位」
+    private var pickedAllLocated: Bool {
+        !pickedAssets.isEmpty && pickedAssets.allSatisfy { $0.latitude != nil }
+    }
 
     @State private var sections: [TimelineMonth] = []
     @State private var undated: [Asset] = []
@@ -137,19 +145,22 @@ struct LibraryView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
 
-            // 主操作：补定位页额外有「补定位」，所有页面都有「移入回收站」
-            if isLocationPage, let onAssign = onAssignLocation {
+            // 主操作：所有页面都能批量补/改定位（勾选集全有定位显示「修改定位」），
+            // 「移入回收站」各页也有
+            if let onAssign = onAssignLocation {
                 Button {
-                    let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+                    let picked = pickedAssets
                     guard !picked.isEmpty else { return }
                     onAssign(picked)
                 } label: {
-                    Label("补定位 已选 \(checkedIDs.count)", systemImage: "mappin.circle")
+                    Label(pickedAllLocated ? "修改定位 已选 \(checkedIDs.count)"
+                          : "补定位 已选 \(checkedIDs.count)",
+                          systemImage: "mappin.circle")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(checkedIDs.isEmpty)
-                .help("只给勾中的 \(checkedIDs.count) 个素材标同一个位置")
+                .help("给勾中的 \(checkedIDs.count) 个素材标同一个位置")
             }
             if onDeleteSelected != nil {
                 // L2 中性 + 确认：批量影响面大所以确认，但 moveToTrash 可恢复，不涂红不加 role。
@@ -238,17 +249,18 @@ struct LibraryView: View {
                              checkedIDs: checkedIDs,
                              onToggleCheck: toggleCheck,
                              onLocate: locateTarget,
-                             canBatchLocate: isLocationPage)
+                             // 有批量通道的页面都允许右键批量项（现在所有页面都有）
+                             canBatchLocate: onAssignLocation != nil)
         }
     }
 
     /// 右键「补定位」的统一入口：
-    /// 补定位页多选且勾了素材 → 整批（文字是「已选 N 条」，行为必须对应）；
+    /// 多选且勾了素材 → 整批（文字是「已选 N 条」，行为必须对应）；
     /// 其余场景 → 右键的那一条，有定位就能改。
     /// 单条走 .single 才能在面板里回显已有位置，批量才是 .batch
     private func locateTarget(id: Int64) {
-        if isLocationPage, selectionMode, !checkedIDs.isEmpty {
-            let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+        if selectionMode, !checkedIDs.isEmpty {
+            let picked = pickedAssets
             if !picked.isEmpty {
                 onAssignLocation?(picked)
                 return

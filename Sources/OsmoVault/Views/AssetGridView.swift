@@ -65,13 +65,18 @@ struct AssetGridView: View {
                         Button(checkedIDs.contains(id) ? "取消选中" : "选中") { onToggleCheck?(id) }
                     }
                     if onLocate != nil {
-                        // 补定位页多选勾了 → 给整批；其余场景对症右键的这一条。
+                        // 多选勾了 → 给整批；其余场景对症右键的这一条。
                         // 有定位显示「修改定位」，没有显示「补定位」（定位不准时从这里改）
                         if selectionMode && canBatchLocate && !checkedIDs.isEmpty {
+                            let allLocated = assets
+                                .filter { checkedIDs.contains($0.id ?? 0) }
+                                .allSatisfy { $0.latitude != nil }
                             Button {
                                 onLocate?(id)
                             } label: {
-                                Label("补定位 · 已选 \(checkedIDs.count) 条", systemImage: "mappin.circle")
+                                Label(allLocated ? "修改定位 · 已选 \(checkedIDs.count) 条"
+                                      : "补定位 · 已选 \(checkedIDs.count) 条",
+                                      systemImage: "mappin.circle")
                             }
                         }
                         Button {

@@ -3,6 +3,9 @@ import SwiftUI
 @MainActor
 final class AppModel: ObservableObject {
     @Published var assets: [Asset] = []
+    /// 回收站里的素材数（侧边栏「回收站」徽标）。
+    /// assets 只含未删除素材，回收站数量需要单独统计，随 reloadAssets 一起刷新
+    @Published private(set) var trashCount: Int = 0
     /// 素材集合的版本号。视图用它判断缓存的分组结果要不要重算，
     /// 不用去比较 8000 条 Asset（值类型，逐条 Equatable 太贵）
     @Published private(set) var assetsVersion: UInt64 = 0
@@ -27,19 +30,21 @@ final class AppModel: ObservableObject {
     private var manualPlaceTask: Task<Void, Never>?
     private static let rootsKey = "OsmoVault.scanRoots"
     private static let historyKey = "OsmoVault.importHistory"
+    private static let sidecarMigrationKey = "OsmoVault.sidecarMigration.v1"
 
     /// 最近一次导入记录（可能来自上一次启动）
     var lastImport: ImportRecord? { importHistory.first ?? fallbackImport }
     /// 最近一次导入新增的素材 id
     var lastImportIDs: [Int64] { lastImport?.ids ?? [] }
 
-    init() {
+        init() {
         self.database = (try? AppDatabase.open()) ?? AppDatabase.inMemory()
         self.scanRoots = UserDefaults.standard.stringArray(forKey: Self.rootsKey) ?? []
         self.importHistory = Self.loadHistory()
         reloadAssets()
         // 启动就开始盯着已导入的文件夹：往里丢照片不用再手动导入一次
         startWatching()
+        migrateManualAnnotationsIfNeeded()
         // 老版本会把每张实况照片的动态视频都抽出来落盘，几千张能攒到几十 GB，
         // 而且新代码会直接复用已有文件、不会主动缩。启动时按配额清一次。
         Task.detached(priority: .background) {
@@ -148,6 +153,9 @@ final class AppModel: ObservableObject {
             }
 
             self.isScanning = false
+            // 手动刷新时顺带补写漏迁的伴生文件：一次性迁移时外接盘没挂、
+            // 素材文件读不到的那些，现在盘插回来了就一并补上（幂等，有 xmp 的自动跳过）
+            if force { self.regenerateSidecars() }
             guard added > 0 else {
                 if force { self.showAutoStatus("已是最新，没有发现新素材") }
                 return
@@ -282,6 +290,7 @@ final class AppModel: ObservableObject {
 
     func reloadAssets() {
         assets = (try? database.readAssets()) ?? []
+        trashCount = ((try? database.readDeletedAssets()) ?? []).count
         invalidateDerived()
         rebuildFallbackImport()
         // 缩略图改成「滚到哪生成哪」（见 noteVisible），这里不再整库后台补齐：
@@ -351,11 +360,13 @@ final class AppModel: ObservableObject {
     func setRating(id: Int64, rating: Int) {
         patch(id: id) { $0.rating = rating }
         try? database.updateRating(id: id, rating: rating)
+        syncSidecars(ids: [id])
     }
 
     func setColorLabel(id: Int64, label: Int) {
         patch(id: id) { $0.colorLabel = label }
         try? database.updateColorLabel(id: id, label: label)
+        syncSidecars(ids: [id])
     }
 
     func toggleFavorite(id: Int64) {
@@ -363,6 +374,39 @@ final class AppModel: ObservableObject {
         let next = !target.isFavorite
         patch(id: id) { $0.isFavorite = next }
         try? database.setFavorite(id: id, favorite: next)
+        syncSidecars(ids: [id])
+    }
+
+    // MARK: - XMP sidecar（人工标注的真源）
+
+    /// 把当前内存状态同步进素材旁的伴生文件。库只是索引，sidecar 才是真源——
+    /// 不写这一步，换机/删库重扫后人工标注就没了。
+    /// 读-合并-写盘放后台线程，批量几百条也不卡 UI；写失败（只读卷拔了之类）给出提示。
+    private func syncSidecars(ids: [Int64], clearedLocation: Bool = false) {
+        guard !ids.isEmpty else { return }
+        let wanted = Set(ids)
+        let requests: [SidecarService.WriteRequest] = assets.compactMap { a in
+            guard let id = a.id, wanted.contains(id) else { return nil }
+            return SidecarService.WriteRequest(
+                filePath: a.filePath,
+                fileHash: a.fileHash,
+                fileName: a.fileName,
+                latitude: a.latitude,
+                longitude: a.longitude,
+                placeName: a.placeName,
+                rating: a.rating,
+                colorLabel: a.colorLabel,
+                isFavorite: a.isFavorite,
+                forceCleared: clearedLocation
+            )
+        }
+        guard !requests.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let failures = SidecarService.apply(requests)
+            guard failures > 0, let self else { return }
+            let text = "\(failures) 个素材的标注没写入伴生文件（磁盘只读？），重建库可能丢"
+            await MainActor.run { self.showAutoStatus(text) }
+        }
     }
 
     // MARK: - 手动补定位
@@ -384,6 +428,7 @@ final class AppModel: ObservableObject {
             $0.placeName = finalName
         }
         try? database.setLocation(ids: ids, latitude: latitude, longitude: longitude, placeName: finalName)
+        syncSidecars(ids: ids)
         if finalName == nil { fillPlaceName(latitude: latitude, longitude: longitude, ids: ids) }
     }
 
@@ -396,6 +441,9 @@ final class AppModel: ObservableObject {
             $0.placeName = nil
         }
         try? database.setLocation(ids: ids, latitude: nil, longitude: nil, placeName: nil)
+        // 必须写显式否定标记：素材文件里可能还有原生 GPS，
+        // 单纯清库的话重建库时会冒回来
+        syncSidecars(ids: ids, clearedLocation: true)
     }
 
     func clearLocation(id: Int64) { clearLocation(ids: [id]) }
@@ -414,6 +462,102 @@ final class AppModel: ObservableObject {
     private func applyPlaceName(_ name: String, ids: [Int64]) {
         patch(ids: Set(ids)) { $0.placeName = name }
         try? database.setPlaceName(ids: ids, name: name)
+        // 只同步手动补定位的反查结果；扫描期的批量反查（flushPlaceNames）不同步，
+        // 否则会给所有带 GPS 的素材写 xmp，违背「只给人工编辑过的写」
+        syncSidecars(ids: ids)
+    }
+
+    // MARK: - 存量标注迁移（一次性）
+
+    /// 老库里的人工标注只存在 sqlite 里，重建库就没了。
+    /// 一次性迁移：重新读素材文件的原生 GPS 与库值比对——对不上、
+    /// 或文件里根本没有但库里有 → 判定为人工补的，写入伴生文件。
+    /// 评分 / 色标 / 收藏天然是人工的，一并写入。
+    private func migrateManualAnnotationsIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.sidecarMigrationKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.sidecarMigrationKey)
+        let snapshot = assets
+        guard !snapshot.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let written = Self.backfillSidecars(from: snapshot)
+            guard written > 0, let self else { return }
+            let text = "已把 \(written) 条人工标注写入伴生文件，重建库不再丢"
+            await MainActor.run { self.showAutoStatus(text) }
+        }
+    }
+
+    /// 手动重跑迁移：外接盘当时没挂上导致漏迁、或想强制补写时用。
+    /// 幂等——已有伴生文件的素材会跳过，不会覆盖
+    func regenerateSidecars() {
+        let snapshot = assets
+        guard !snapshot.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let written = Self.backfillSidecars(from: snapshot)
+            let text = written > 0 ? "已补写 \(written) 条标注到伴生文件" : "没有需要补写的标注"
+            guard let self else { return }
+            await MainActor.run { self.showAutoStatus(text) }
+        }
+    }
+
+    /// 后台跑的纯函数：nonisolated，别继承类的 MainActor 隔离
+    private nonisolated static func backfillSidecars(from assets: [Asset]) -> Int {
+        var written = 0
+        for a in assets {
+            let url = URL(fileURLWithPath: a.filePath)
+            // 外接盘拔了就跳过，别把它误判成「需要迁移」
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            guard let ann = manualAnnotation(for: a, url: url) else { continue }
+            if SidecarService.write(ann, for: url, fileHash: a.fileHash) { written += 1 }
+        }
+        return written
+    }
+
+    /// 判定哪些素材有人工标注：
+    /// - 评分 / 色标 / 收藏非默认 → 一定是人工的
+    /// - 有坐标、且与文件原生 GPS 不一致（或文件里读不出）→ 人工补的
+    /// - 库里没坐标、文件里有原生 GPS → 可能是清除过、也可能只是老版本读取失败，
+    ///   分不清就不动——宁可少迁一条，不要把可用 GPS 屏蔽掉
+    private nonisolated static func manualAnnotation(for a: Asset, url: URL) -> SidecarAnnotation? {
+        // 已有伴生文件（用户手工写的 / 之前迁过）不覆盖
+        if SidecarService.exists(for: url, fileHash: a.fileHash) { return nil }
+
+        let hasEdits = a.rating != 0 || a.colorLabel != 0 || a.isFavorite
+        var manualLocation = false
+        if let lat = a.latitude, let lon = a.longitude {
+            if let native = nativeCoordinate(of: a, url: url) {
+                manualLocation = abs(native.0 - lat) > 1e-6 || abs(native.1 - lon) > 1e-6
+            } else {
+                manualLocation = true
+            }
+        }
+        guard hasEdits || manualLocation else { return nil }
+
+        var ann = SidecarAnnotation()
+        ann.fileName = a.fileName
+        ann.fileHash = a.fileHash
+        if manualLocation {
+            ann.latitude = a.latitude
+            ann.longitude = a.longitude
+            if let p = a.placeName { ann.placeName = p }
+        }
+        if hasEdits {
+            ann.rating = a.rating
+            ann.colorLabel = a.colorLabel
+            ann.isFavorite = a.isFavorite
+        }
+        return ann.hasContent ? ann : nil
+    }
+
+    /// 素材文件里的原生坐标。照片 / 实况走 EXIF；视频走 DJI 的 SRT 伴生字幕。
+    /// （ISO6709 容器元数据要 async 读，这里读不到顶多多写一个内容相同的 xmp，无害）
+    private nonisolated static func nativeCoordinate(of a: Asset, url: URL) -> (Double, Double)? {
+        if !a.isVideo {
+            guard let info = PhotoProbe.info(url: url),
+                  let lat = info.latitude, let lon = info.longitude else { return nil }
+            return (lat, lon)
+        }
+        guard let srt = DJINamingRule.srtSibling(for: url) else { return nil }
+        return GPSParser.parseFirstCoordinate(from: srt)
     }
 
     func moveToTrash(id: Int64) {

@@ -82,55 +82,120 @@ struct DuplicateView: View {
     }
 }
 
-// MARK: - 单条副本
+// MARK: - 单条副本卡片
 
-private struct DuplicateRow: View {
+/// 重复素材的一个副本：缩略图 + 文件名 + 路径 + 大小。
+/// 预览复用图库那条缩略图通道（内存/磁盘缓存），滚到才解码
+private struct DuplicateCard: View {
     let asset: Asset
     let isKeeper: Bool
     let onRemove: () -> Void
 
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: isKeeper ? "checkmark.circle.fill" : "circle")
-                .font(.caption)
-                .foregroundStyle(isKeeper ? Color.green : Color.secondary)
-                .help(isKeeper ? "保留" : "重复项")
+    @State private var isHovered = false
 
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .bottomLeading) {
+                // 弹性骨架 + overlay：图片的固有宽高比不会撑破列宽
+                Color.clear
+                    .overlay { AsyncThumbView(asset: asset) }
+                    .frame(height: 130)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                    )
+
+                VaultBadge {
+                    HStack(spacing: 4) {
+                        Image(systemName: asset.kind == .video ? "video.fill"
+                              : asset.kind == .livePhoto ? "livephoto" : "photo")
+                            .font(.caption2)
+                        if asset.kind != .photo {
+                            Text(AssetCell.durationText(asset.durationSeconds))
+                        }
+                    }
+                }
+                .padding(6)
+            }
+            .overlay(alignment: .topTrailing) {
+                if isKeeper {
+                    // 保留项常驻一个绿色角标：同一屏里一眼看出留谁
+                    Label("保留", systemImage: "checkmark.circle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.green, in: Capsule())
+                        .shadow(radius: 1)
+                        .padding(6)
+                } else if isHovered {
+                    Button(action: onRemove) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.white)
+                            .shadow(radius: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("从库中移除这一条")
+                    .accessibilityLabel(Text("从库中移除这一条"))
+                    .padding(6)
+                }
+            }
+
+            Text(asset.fileName)
+                .font(.footnote)
+                .lineLimit(1)
+                .help(asset.filePath)
+            Text(Self.readableSize(asset.fileSize))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Text(abbreviate(asset.filePath))
-                .font(.caption)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(asset.filePath)
-                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(ByteCountFormatter.string(fromByteCount: asset.fileSize, countStyle: .file))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: asset.filePath)])
-            } label: {
-                Image(systemName: "arrow.right.circle").font(.caption)
+            HStack(spacing: 8) {
+                if isKeeper {
+                    Text("最早导入 · 保留")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("移除此条", role: .destructive) { onRemove() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: asset.filePath)])
+                } label: {
+                    Image(systemName: "arrow.right.circle").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("在访达中显示")
+                .accessibilityLabel(Text("在访达中显示"))
             }
-            .buttonStyle(.borderless)
-            .help("在访达中显示")
-            .accessibilityLabel(Text("在访达中显示"))
-
-            Button(action: onRemove) {
-                Image(systemName: "trash").font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .help("从库中移除这一条")
-            .accessibilityLabel(Text("从库中移除这一条"))
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color(nsColor: .controlBackgroundColor)))
+        .onHover { isHovered = $0 }
     }
 
     private func abbreviate(_ path: String) -> String {
         let home = NSHomeDirectory()
         return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
+    private static func readableSize(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "—" }
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024) }
+        if mb >= 1 { return String(format: "%.0f MB", mb) }
+        return String(format: "%.0f KB", Double(bytes) / 1024)
     }
 }
 
@@ -169,9 +234,10 @@ private struct GroupCard: View {
                 .disabled(redundant.isEmpty)
             }
 
-            VStack(spacing: 4) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 10)],
+                      alignment: .leading, spacing: 10) {
                 ForEach(group) { asset in
-                    DuplicateRow(asset: asset, isKeeper: asset.id == keeperID) {
+                    DuplicateCard(asset: asset, isKeeper: asset.id == keeperID) {
                         if let id = asset.id { onRemove([id]) }
                     }
                 }
@@ -179,10 +245,5 @@ private struct GroupCard: View {
         }
         .padding(12)
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private func abbreviate(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
 }

@@ -68,6 +68,7 @@ struct MainWindowView: View {
                     lastImportedAt: { appModel.lastImportedAt($0) },
                     onRemoveSource: { sourceToRemove = $0 },
                     duplicateCount: appModel.duplicateCount,
+                    trashCount: appModel.trashCount,
                     albumCounts: appModel.albumCounts,
                     placeCounts: appModel.places)
     }
@@ -354,8 +355,17 @@ struct MainWindowView: View {
                     onToggleFavorite: { appModel.toggleFavorite(id: $0) },
                     onVisible: { appModel.noteVisible($0) },
                     isLocationPage: isLocationPage,
-                    // 只在「补定位」页挂这个入口，其他页面不再冒出「补定位 N」按钮
-                    onAssignLocation: isLocationPage ? { locationTarget = .batch($0) } : nil,
+                    // 「补定位」按钮只在补定位页挂，其他页面不再冒出「补定位 N」按钮。
+                    // 单条走 .single：LocationEditorSheet 能回显已有坐标/地名；
+                    // 多条才是 .batch（批量没有"已有坐标"的概念）
+                    onAssignLocation: isLocationPage ? { list in
+                        locationTarget = list.count == 1 ? .single(list[0]) : .batch(list)
+                    } : nil,
+                    // 右键补定位：**所有页面**都可用——有定位选「修改定位」，没有选「补定位」
+                    onLocateItem: { id in
+                        guard let a = appModel.asset(id: id) else { return }
+                        locationTarget = .single(a)
+                    },
                     // 所有页面都能多选后批量移入回收站
                     onDeleteSelected: { appModel.moveToTrash(ids: $0.compactMap(\.id)) },
                     emptyHint: hint)

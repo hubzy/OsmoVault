@@ -16,8 +16,10 @@ struct LibraryView: View {
     var onVisible: ((Int64) -> Void)?
     /// 只有「补定位」页才提供批量补定位入口，其他页面不放这个按钮
     var isLocationPage = false
-    /// 批量补定位：把**用户勾选**的那些素材交给调用方
+    /// 批量补定位：把**用户勾选**的那些素材交给调用方（补定位页的按钮与右键批量都走这里）
     var onAssignLocation: (([Asset]) -> Void)?
+    /// 右键补定位的**单条**通道：所有页面都可用（有定位=修改，没定位=添加）
+    var onLocateItem: ((Int64) -> Void)?
     /// 多选后的批量操作：普通页是「移入回收站」，由调用方决定具体动作
     var onDeleteSelected: (([Asset]) -> Void)?
     var emptyHint: String?
@@ -234,8 +236,25 @@ struct LibraryView: View {
                              onVisible: onVisible,
                              selectionMode: selectionMode,
                              checkedIDs: checkedIDs,
-                             onToggleCheck: toggleCheck)
+                             onToggleCheck: toggleCheck,
+                             onLocate: locateTarget,
+                             canBatchLocate: isLocationPage)
         }
+    }
+
+    /// 右键「补定位」的统一入口：
+    /// 补定位页多选且勾了素材 → 整批（文字是「已选 N 条」，行为必须对应）；
+    /// 其余场景 → 右键的那一条，有定位就能改。
+    /// 单条走 .single 才能在面板里回显已有位置，批量才是 .batch
+    private func locateTarget(id: Int64) {
+        if isLocationPage, selectionMode, !checkedIDs.isEmpty {
+            let picked = assets.filter { checkedIDs.contains($0.id ?? -1) }
+            if !picked.isEmpty {
+                onAssignLocation?(picked)
+                return
+            }
+        }
+        onLocateItem?(id)
     }
 
     /// 固定时间正序：2026年 → 1月 → 2月 往后排
@@ -341,6 +360,11 @@ private struct TimelineScroller: View {
     var selectionMode = false
     var checkedIDs: Set<Int64> = []
     var onToggleCheck: ((Int64) -> Void)?
+    /// 右键「补定位」：所有页面都传。回调收卡片 id，
+    /// 多选勾了什么由 LibraryView 组装（见 locateTarget）
+    var onLocate: ((Int64) -> Void)?
+    /// 补定位页才显示「补定位 已选 N 条」批量菜单项
+    var canBatchLocate = false
 
     /// 与列表滚动位置双向绑定的原始值，滚动过程中可能短暂回写 nil
     @State private var scrolledMonthID: String?
@@ -392,6 +416,8 @@ private struct TimelineScroller: View {
                                                       selectionMode: selectionMode,
                                                       checkedIDs: checkedIDs,
                                                       onToggleCheck: onToggleCheck,
+                                                      onLocate: onLocate,
+                                                      canBatchLocate: canBatchLocate,
                                                       embedded: true)
                                     }
                                 }
@@ -424,6 +450,8 @@ private struct TimelineScroller: View {
                                               selectionMode: selectionMode,
                                               checkedIDs: checkedIDs,
                                               onToggleCheck: onToggleCheck,
+                                              onLocate: onLocate,
+                                              canBatchLocate: canBatchLocate,
                                               embedded: true)
                             } header: {
                                 HStack(spacing: 8) {

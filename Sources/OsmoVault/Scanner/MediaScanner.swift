@@ -174,7 +174,7 @@ struct MediaScanner {
             ?? (attrs?[.creationDate] as? Date)
             ?? (attrs?[.modificationDate] as? Date)
 
-        return Asset(
+        var asset = Asset(
             id: nil,
             filePath: url.path,
             fileName: url.lastPathComponent,
@@ -200,6 +200,24 @@ struct MediaScanner {
             isDeleted: false,
             createdAt: Date()
         )
+        SidecarService.read(for: url, fileHash: fingerprint).map { ann in
+            // 伴生文件里的标注覆盖原生 EXIF / SRT：xmp（人工）优先
+            if ann.locationCleared {
+                asset.latitude = nil
+                asset.longitude = nil
+                asset.placeName = nil
+            } else if let lat = ann.latitude, let lon = ann.longitude {
+                asset.latitude = lat
+                asset.longitude = lon
+                if let p = ann.placeName { asset.placeName = p }
+            } else if let p = ann.placeName, asset.placeName == nil {
+                asset.placeName = p
+            }
+            if let r = ann.rating { asset.rating = r }
+            if let c = ann.colorLabel { asset.colorLabel = c }
+            if let f = ann.isFavorite { asset.isFavorite = f }
+        }
+        return asset
     }
 
     private static func buildPhotoAsset(url: URL, fingerprint: String) -> Asset {
@@ -214,7 +232,7 @@ struct MediaScanner {
         let sibling = Self.liveVideoSibling(for: url)
         let hasMotion = sibling != nil || MotionPhoto.containsMotion(in: url)
 
-        return Asset(
+        var asset = Asset(
             id: nil,
             filePath: url.path,
             fileName: url.lastPathComponent,
@@ -239,6 +257,23 @@ struct MediaScanner {
             isDeleted: false,
             createdAt: Date()
         )
+        SidecarService.read(for: url, fileHash: fingerprint).map { ann in
+            if ann.locationCleared {
+                asset.latitude = nil
+                asset.longitude = nil
+                asset.placeName = nil
+            } else if let lat = ann.latitude, let lon = ann.longitude {
+                asset.latitude = lat
+                asset.longitude = lon
+                if let p = ann.placeName { asset.placeName = p }
+            } else if let p = ann.placeName, asset.placeName == nil {
+                asset.placeName = p
+            }
+            if let r = ann.rating { asset.rating = r }
+            if let c = ann.colorLabel { asset.colorLabel = c }
+            if let f = ann.isFavorite { asset.isFavorite = f }
+        }
+        return asset
     }
 
     /// 同一目录下同名、且够短的视频 → 认为是这张图的实况部分

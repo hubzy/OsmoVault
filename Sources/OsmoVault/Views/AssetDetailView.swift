@@ -143,6 +143,7 @@ struct AssetDetailView: View {
                               onGrab: onGrab,
                               onToggleFavorite: onToggleFavorite,
                               onDelete: onDelete,
+                              onEditLocation: onEditLocation,
                               shortcutsEnabled: shortcutsEnabled)
             }
             .padding(.horizontal, 12)
@@ -672,6 +673,8 @@ private struct ActionSection: View {
     var onGrab: (() -> Void)?
     var onToggleFavorite: (() -> Void)?
     var onDelete: (() -> Void)?
+    /// 补定位 / 修改定位（有定位就能改，定位不准时从这里修正）
+    var onEditLocation: (() -> Void)?
     /// LocationEditorSheet 打开时禁用裸字母 S（不改 ⌘S / ⌥S，也不把按钮置灰）
     var shortcutsEnabled: Bool = true
 
@@ -679,12 +682,20 @@ private struct ActionSection: View {
         // 图标 + 文字横向排列，整组居中；两侧 Spacer 撑开实现居中
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            // 纯照片没有可截的帧，按钮不给出现（S 快捷键也随之失效）
-            if asset.kind != .photo {
+            // 「截取实况图」是把普通视频的某一秒截成实况照片——只有视频需要。
+            // 实况照片本身已带动态片段，再截是重复造一条；纯照片没有可截的帧。
+            // 两者都不给这个按钮（S 快捷键也随之失效）
+            if asset.kind == .video {
                 ActionItem(title: "截取实况图", systemImage: "camera.shutter.button",
                            keyEquivalent: shortcutsEnabled ? "s" : nil) {
                     onGrab?()
                 }
+            }
+            ActionItem(title: asset.latitude == nil ? "补定位" : "修改定位",
+                       fullTitle: asset.latitude == nil ? "补定位" : "修改定位",
+                       systemImage: asset.latitude == nil ? "mappin.slash.circle" : "mappin.and.ellipse",
+                       tint: nil) {
+                onEditLocation?()
             }
             // 可见标题缩到 5 字避免 64pt 固定框截断；help / VO 仍用标准全称
             ActionItem(title: "访达中显示", fullTitle: "在访达中显示", systemImage: "folder") {

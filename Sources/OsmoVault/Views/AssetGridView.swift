@@ -13,6 +13,11 @@ struct AssetGridView: View {
     var selectionMode = false
     var checkedIDs: Set<Int64> = []
     var onToggleCheck: ((Int64) -> Void)?
+    /// 右键「补定位」。回调传当前卡片 id；多选模式下由调用方决定作用于勾选集还是单条
+    var onLocate: ((Int64) -> Void)?
+    /// 只有「补定位」页置 true：右键菜单里才出现「补定位 已选 N 条」批量项。
+    /// 其他页面（图库/来源/地点…）右键只对症当前这条，避免点了"批量"实际只改一条
+    var canBatchLocate = false
     var emptyHint: String?
     /// 嵌入别的滚动容器（比如时间轴）时置 true：不再套自己的 ScrollView，避免双层滚动
     var embedded = false
@@ -58,6 +63,23 @@ struct AssetGridView: View {
                 .contextMenu {
                     if selectionMode {
                         Button(checkedIDs.contains(id) ? "取消选中" : "选中") { onToggleCheck?(id) }
+                    }
+                    if onLocate != nil {
+                        // 补定位页多选勾了 → 给整批；其余场景对症右键的这一条。
+                        // 有定位显示「修改定位」，没有显示「补定位」（定位不准时从这里改）
+                        if selectionMode && canBatchLocate && !checkedIDs.isEmpty {
+                            Button {
+                                onLocate?(id)
+                            } label: {
+                                Label("补定位 · 已选 \(checkedIDs.count) 条", systemImage: "mappin.circle")
+                            }
+                        }
+                        Button {
+                            onLocate?(id)
+                        } label: {
+                            Label(asset.latitude == nil ? "补定位…" : "修改定位…",
+                                  systemImage: "mappin.circle")
+                        }
                     }
                     Button(asset.isFavorite ? "取消收藏" : "收藏") {
                         onToggleFavorite?(id)
@@ -214,24 +236,32 @@ struct AssetCell: View {
                         .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
                 )
 
-            // 照片没有时长，改标类型；视频/实况标时长（实况另加一个角标记号）
-            VaultBadge {
-                HStack(spacing: 4) {
-                    if asset.kind == .livePhoto {
-                        Image(systemName: "livephoto")
-                            .font(.caption2)
-                            .help("实况照片")
-                    }
-                    if asset.kind == .photo {
-                        Image(systemName: "photo")
-                            .font(.caption2)
-                            .help("照片")
-                    } else {
+            // 照片没有时长，改标类型；视频标时长。
+            // 实况照片：类型已由左上角的 LIVE 徽章表达，右下角不再重复图标——
+            // 只在实际有真实时长时才补一个时长角标（当前扫描不探测实况视频时长，
+            // durationSeconds 恒为 0，所以右下角角标整体不出现）
+            if asset.kind == .livePhoto {
+                if asset.durationSeconds > 0 {
+                    VaultBadge {
                         Text(Self.durationText(asset.durationSeconds))
                     }
+                    .padding(6)
                 }
+            } else {
+                VaultBadge {
+                    HStack(spacing: 4) {
+                        if asset.kind == .photo {
+                            Image(systemName: "photo")
+                                .font(.caption2)
+                                .help("照片")
+                        }
+                        if asset.durationSeconds > 0 {
+                            Text(Self.durationText(asset.durationSeconds))
+                        }
+                    }
+                }
+                .padding(6)
             }
-            .padding(6)
         }
         .overlay(alignment: .topTrailing) {
             if selectionMode {

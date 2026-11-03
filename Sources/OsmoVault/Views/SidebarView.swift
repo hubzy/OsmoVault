@@ -22,6 +22,8 @@ struct SidebarView: View {
     /// 右键来源 → 从库中移除
     var onRemoveSource: ((String) -> Void)?
     var duplicateCount: Int = 0
+    /// 回收站内的素材数（assets 不含已删除的，由外部统计后传入）
+    var trashCount: Int = 0
     /// 智能相册 id → 数量。由外部（AppModel）算好缓存后传进来：
     /// 13 个相册各 filter 一遍 8000 条，放在这里算就是每次 body 13 万次判断
     var albumCounts: [String: Int] = [:]
@@ -87,7 +89,8 @@ struct SidebarView: View {
                 row(icon: "doc.on.doc", title: "重复素材", count: duplicateCount,
                     empty: duplicateCount == 0)
                     .tag(SidebarItem.duplicates)
-                row(icon: "trash", title: "回收站")
+                row(icon: "trash", title: "回收站", count: trashCount,
+                    empty: trashCount == 0)
                     .tag(SidebarItem.trash)
             }
         }

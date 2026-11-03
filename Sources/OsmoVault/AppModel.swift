@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// 侧边栏「拍摄地」的一行或一组。
+/// province 非 nil = 有省层级，折叠展示（标题 = 省名，子行 = 城市）；nil = 直辖市/海外等地名，直接平铺
+struct SidebarPlaceGroup: Identifiable {
+    var id: String { province ?? "~" + (cities.first?.city ?? "") }
+    let province: String?
+    let total: Int
+    let cities: [(city: String, count: Int)]
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var assets: [Asset] = []
@@ -200,7 +209,8 @@ final class AppModel: ObservableObject {
         var sources: [(path: String, count: Int)] = []
         var duplicateCount: Int = 0
         var albumCounts: [String: Int] = [:]
-        var places: [(name: String, count: Int)] = []
+        /// 拍摄地聚合：省组（可折叠）+ 无省平铺项（直辖市/海外）。侧边栏展示用
+        var placeGroups: [SidebarPlaceGroup] = []
         var index: [Int64: Asset] = [:]      // id → 素材，避免线性查找
         var geotagged: [Asset] = []          // 带 GPS 的素材，地图页专用
         var order: [Int64: Int] = [:]        // id → 在 assets 里的下标，缩略图按窗口补齐时用
@@ -258,8 +268,7 @@ final class AppModel: ObservableObject {
         }
         d.albumCounts = albumCounts
 
-        let grouped = Dictionary(grouping: assets.compactMap(\.placeName), by: { $0 })
-        d.places = grouped.map { ($0.key, $0.value.count) }.sorted { $0.count > $1.count }
+        d.placeGroups = Self.buildPlaceGroups(assets)
 
         d.geotagged = assets.filter { $0.latitude != nil && $0.longitude != nil }
 
@@ -280,7 +289,10 @@ final class AppModel: ObservableObject {
     /// 重复素材的组数（侧边栏只显示数量，不建分组对象）
     var duplicateCount: Int { currentDerived().duplicateCount }
     var albumCounts: [String: Int] { currentDerived().albumCounts }
-    var places: [(name: String, count: Int)] { currentDerived().places }
+    /// 拍摄地聚合（按省分组 + 无省平铺），侧边栏折叠展示用
+    var placeGroups: [SidebarPlaceGroup] {
+        currentDerived().placeGroups
+    }
 
     /// 按 id 取素材。原来 `assets.first { $0.id == id }` 是 O(n)，
     /// 选中态每帧都要查一次
@@ -685,6 +697,75 @@ final class AppModel: ObservableObject {
             }
         }
         return result.sorted { ($0.first?.fileName ?? "") < ($1.first?.fileName ?? "") }
+    }
+
+    /// 地名解析结果：省名（可能为空，如直辖市/海外）+ 市名（去掉尾部「市」）
+    struct PlaceParts {
+        var province: String?
+        var city: String
+    }
+
+    /// 解析地名。库里的地名有两种来源格式：
+    /// - 逆地理编码：省·市（如「广东省·广州」）；直辖市没有省，历史数据是「·重庆」这种空省前缀
+    /// - 手工输入 / 历史遗留：纯市名（如「广州市」）
+    /// 统一提取为 (省?, 市)，市名去掉尾部「市」，让新旧格式能按市名聚合
+    static func placeParts(of placeName: String) -> PlaceParts {
+        let trimmed = placeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let dot = trimmed.firstIndex(of: "·") {
+            let province = trimmed[..<dot]
+            let city = trimmed[trimmed.index(after: dot)...]
+            return PlaceParts(province: province.isEmpty ? nil : String(province),
+                              city: cityWithoutSuffix(String(city)))
+        }
+        return PlaceParts(province: nil, city: cityWithoutSuffix(trimmed))
+    }
+
+    /// 取地名里的市名（无省信息则整名），拍摄地筛选按它匹配：
+    /// 「广东省·广州」与「广州市」（历史遗留）都归一为「广州」，点一下全出来
+    static func city(of placeName: String?) -> String? {
+        guard let p = placeName, !p.isEmpty else { return nil }
+        return placeParts(of: p).city
+    }
+
+    private static func cityWithoutSuffix(_ s: String) -> String {
+        s.hasSuffix("市") ? String(s.dropLast()) : s
+    }
+
+    /// 把地名聚合成侧边栏条目：先按市名合并（「广东省·广州」+「广州市」=「广州」），
+    /// 再按省份分组；没有省份的（直辖市、海外地名）成为独立平铺项。
+    /// 组/行按素材总数降序。
+    static func buildPlaceGroups(_ assets: [Asset]) -> [SidebarPlaceGroup] {
+        var cityCounts: [String: Int] = [:]
+        var provinceOfCity: [String: String] = [:]
+        for a in assets {
+            guard let pn = a.placeName, !pn.isEmpty else { continue }
+            let parts = placeParts(of: pn)
+            cityCounts[parts.city, default: 0] += 1
+            if let p = parts.province { provinceOfCity[parts.city] = p }
+        }
+        guard !cityCounts.isEmpty else { return [] }
+
+        var byProvince: [String: [(city: String, count: Int)]] = [:]
+        var standalone: [(city: String, count: Int)] = []
+        for (city, count) in cityCounts {
+            if let province = provinceOfCity[city] {
+                byProvince[province, default: []].append((city: city, count: count))
+            } else {
+                standalone.append((city: city, count: count))
+            }
+        }
+
+        var groups: [SidebarPlaceGroup] = []
+        for (province, cities) in byProvince {
+            let sorted = cities.sorted { $0.count > $1.count }
+            let total = sorted.reduce(0) { $0 + $1.count }
+            groups.append(SidebarPlaceGroup(province: province, total: total, cities: sorted))
+        }
+        for item in standalone {
+            groups.append(SidebarPlaceGroup(province: nil, total: item.count,
+                                            cities: [(item.city, item.count)]))
+        }
+        return groups.sorted { $0.total > $1.total }
     }
 
     /// 只要组数不要分组内容（侧边栏计数用），省掉建数组和排序

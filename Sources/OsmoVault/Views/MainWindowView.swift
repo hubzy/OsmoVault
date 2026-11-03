@@ -70,7 +70,7 @@ struct MainWindowView: View {
                     duplicateCount: appModel.duplicateCount,
                     trashCount: appModel.trashCount,
                     albumCounts: appModel.albumCounts,
-                    placeCounts: appModel.places)
+                    placeGroups: appModel.placeGroups)
     }
 
     var body: some View {
@@ -334,8 +334,10 @@ struct MainWindowView: View {
             } else {
                 placeholder("相册不存在")
             }
-        case .place(let name):
-            library(appModel.assets.filter { $0.placeName == name }, title: name)
+        case .place(let key):
+            // tag 里存的已是归一化市名（「广东省·广州」和「广州市」都归为「广州」），
+            // 筛选按市名匹配，两种格式的地名点一次全出来
+            library(appModel.assets.filter { AppModel.city(of: $0.placeName) == key }, title: key)
         case .source(let path):
             let name = URL(fileURLWithPath: path).lastPathComponent
             library(appModel.assets.filter { $0.filePath.hasPrefix(path) },

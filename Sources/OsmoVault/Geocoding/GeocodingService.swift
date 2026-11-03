@@ -30,7 +30,16 @@ final class GeocodingService {
                 failures.insert(key)
                 return nil
             }
-            let name = city.isEmpty || province.contains(city) ? province : province + "·" + city
+            // 直辖市：CLGeocoder 的 administrativeArea 为空（没有省级），直接存市名，
+            // 别拼成「·重庆」这种空省前缀的地名（历史上这样存过，侧边栏会出现空白分组）
+            let name: String
+            if province.isEmpty {
+                name = city
+            } else if city.isEmpty || province.contains(city) {
+                name = province
+            } else {
+                name = province + "·" + city
+            }
             cache[key] = name
             return name
         } catch {

@@ -27,8 +27,10 @@ struct SidebarView: View {
     /// 智能相册 id → 数量。由外部（AppModel）算好缓存后传进来：
     /// 13 个相册各 filter 一遍 8000 条，放在这里算就是每次 body 13 万次判断
     var albumCounts: [String: Int] = [:]
-    /// 拍摄地 → 数量，同上
-    var placeCounts: [(name: String, count: Int)] = []
+    /// 拍摄地聚合结果（省组 + 无省平铺项）。由 AppModel 算好缓存后传入
+    var placeGroups: [SidebarPlaceGroup] = []
+    /// 已展开的省份。默认全收起，侧边栏才不因几十个城市变得冗长
+    @State private var expandedProvinces: Set<String> = []
 
     private var albums: [(album: SmartAlbum, count: Int)] {
         SmartAlbum.builtin().map { ($0, albumCounts[$0.id] ?? 0) }
@@ -73,11 +75,30 @@ struct SidebarView: View {
                 }
             }
 
-            if !placeCounts.isEmpty {
+            if !placeGroups.isEmpty {
                 Section("拍摄地") {
-                    ForEach(placeCounts, id: \.name) { place in
-                        row(icon: "mappin.and.ellipse", title: place.name, count: place.count)
-                            .tag(SidebarItem.place(place.name))
+                    ForEach(placeGroups) { group in
+                        if let province = group.province {
+                            // 有省层级的城市：折叠展示，省行只做标题不参与选择
+                            DisclosureGroup(isExpanded: expandedBinding(for: province)) {
+                                ForEach(group.cities, id: \.city) { city in
+                                    row(icon: "mappin.and.ellipse", title: city.city,
+                                        count: city.count, empty: city.count == 0)
+                                        .tag(SidebarItem.place(city.city))
+                                }
+                            } label: {
+                                // macOS 的 DisclosureGroup 只有箭头可点，加整行点击一起切换展开
+                                row(icon: "mappin.and.ellipse", title: province,
+                                    count: group.total)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { toggleProvince(province) }
+                            }
+                        } else if let city = group.cities.first {
+                            // 直辖市 / 海外：本身没有省份层级，直接平铺
+                            row(icon: "mappin.and.ellipse", title: city.city,
+                                count: group.total)
+                                .tag(SidebarItem.place(city.city))
+                        }
                     }
                 }
             }
@@ -101,6 +122,29 @@ struct SidebarView: View {
 
     private func folderName(_ path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    /// 省份折叠状态绑定：展开集不存在则收起。视图刷新（换页/数据变）不丢展开状态
+    private func expandedBinding(for province: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedProvinces.contains(province) },
+            set: { isOn in
+                if isOn {
+                    expandedProvinces.insert(province)
+                } else {
+                    expandedProvinces.remove(province)
+                }
+            }
+        )
+    }
+
+    /// 点击省行整行切换折叠
+    private func toggleProvince(_ province: String) {
+        if expandedProvinces.contains(province) {
+            expandedProvinces.remove(province)
+        } else {
+            expandedProvinces.insert(province)
+        }
     }
 
     private func sourceHelp(_ item: (path: String, count: Int)) -> String {

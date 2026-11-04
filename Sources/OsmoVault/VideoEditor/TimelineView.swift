@@ -1,0 +1,974 @@
+import FCCore
+import FCMedia
+import SwiftUI
+import UniformTypeIdentifiers
+
+private enum TL {
+    static let leading: CGFloat = 16
+    static let ruler: CGFloat = 26
+    static let main: CGFloat = 70
+    static let music: CGFloat = 44
+    static let subtitle: CGFloat = 30
+    static let text: CGFloat = 24
+    static let duck: CGFloat = 16
+    static let laneGap: CGFloat = 2
+    static let gap: CGFloat = 8
+    static let handle: CGFloat = 8
+}
+
+/// 各轨道的纵向位置。文字轨在主轨上方，时间重叠的文字分多行；音频轨可以有多条。
+private struct Rows {
+    let textLanes: Int
+    let audioLanes: Int
+    /// 显示「人声」行（有人声区间或有音频开启了避让时）。
+    let showsDuck: Bool
+
+    var textY: CGFloat { TL.ruler + TL.gap }
+    func laneY(_ lane: Int) -> CGFloat { textY + CGFloat(lane) * (TL.text + TL.laneGap) }
+    var textHeight: CGFloat { CGFloat(textLanes) * (TL.text + TL.laneGap) - TL.laneGap }
+    var mainY: CGFloat { textY + textHeight + TL.gap }
+    var duckY: CGFloat { mainY + TL.main + TL.gap }
+    var musicY: CGFloat { showsDuck ? duckY + TL.duck + TL.gap : duckY }
+    func audioLaneY(_ lane: Int) -> CGFloat { musicY + CGFloat(lane) * (TL.music + TL.laneGap) }
+    var musicHeight: CGFloat { CGFloat(audioLanes) * (TL.music + TL.laneGap) - TL.laneGap }
+    var subtitleY: CGFloat { musicY + musicHeight + TL.gap }
+    /// 内容总高（不含尾部空隙）：只要不超过视口高度，纵向就完全不滚动
+    var height: CGFloat { subtitleY + TL.subtitle }
+}
+
+/// 时间线：时间尺、文字轨、主视频轨、音频轨（可多条）、字幕轨、播放头。
+struct TimelineView: View {
+    @Bindable var model: EditorModel
+    @State private var scrollX: CGFloat = 0
+    @State private var scrollY: CGFloat = 0
+    @State private var viewport: CGSize = CGSize(width: 800, height: 250)
+
+    private var pps: CGFloat { CGFloat(model.pointsPerSecond) }
+    private func x(_ t: Time) -> CGFloat { TL.leading + CGFloat(t.seconds) * pps }
+    private func time(_ x: CGFloat) -> Time { Time(seconds: max(0, Double((x - TL.leading) / pps))) }
+
+    private var textLanes: [UUID: Int] { TextClip.lanes(model.project.texts) }
+    private var rows: Rows {
+        Rows(textLanes: max(1, TextClip.laneCount(model.project.texts)), audioLanes: model.project.audioLaneCount,
+             showsDuck: !model.project.duckRanges.isEmpty || model.project.musicTrack.contains { $0.ducks })
+    }
+
+    var body: some View {
+        let rows = rows
+        GeometryReader { geo in
+            let vpW = geo.size.width
+            let vpH = geo.size.height
+            let width = max(vpW, x(model.duration) + 400)
+            let height = max(vpH, rows.height)
+            // 手动滚动：固定视口内，内容整体平移 (-scrollX, -scrollY)。
+            // 刻意不走 SwiftUI ScrollView，彻底绕开 NavigationSplitView 详情列坏容器
+            // (PlatformContainer) 把内部 NSScrollView 撑宽 / 偏移「一个侧边栏宽度」带来的
+            // 双层滚动、多出滚动条、滚不到最左等问题（documentView 原点被带偏，普通横向
+            // 滚动的范围里 origin 永远到不了 0，而 Shift+滚轮走另一根轴反而能越界顶到）。
+            ZStack(alignment: .topLeading) {
+                // 捏合 / ⌘⌥+滚轮缩放、滚轮平移：直接驱动 scrollX / scrollY（夹在 [0, maxX]）
+                ZoomEventCatcher(model: model, pointsPerSecond: model.pointsPerSecond,
+                                 scrollX: $scrollX, scrollY: $scrollY,
+                                 viewport: CGSize(width: vpW, height: vpH),
+                                 content: CGSize(width: width, height: height))
+                    .frame(width: width, height: height)
+                    .allowsHitTesting(false)
+
+                // 背景：点击 / 拖动定位播放头，取消选择
+                Color.clear
+                    .frame(width: width, height: height)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            if v.translation == .zero { model.selection = nil }
+                            model.seek(to: time(v.location.x))
+                        })
+
+                RulerView(pps: pps, width: width)
+                    .frame(width: width, height: TL.ruler)
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { model.seek(to: time($0.location.x)) })
+
+                trackBackground(y: rows.textY, height: rows.textHeight, width: width)
+                trackBackground(y: rows.mainY, height: TL.main, width: width)
+                if rows.showsDuck {
+                    trackBackground(y: rows.duckY, height: TL.duck, width: width)
+                    duckRow(y: rows.duckY)
+                }
+                ForEach(0..<rows.audioLanes, id: \.self) { lane in
+                    trackBackground(y: rows.audioLaneY(lane), height: TL.music, width: width)
+                }
+                trackBackground(y: rows.subtitleY, height: TL.subtitle, width: width)
+
+                textTrack(rows)
+                mainTrack(width: width, y: rows.mainY)
+                musicTrack(rows)
+                subtitleTrack(y: rows.subtitleY)
+
+                PlayheadView(height: height)
+                    .offset(x: x(model.playhead) - 6)
+                    .gesture(DragGesture().onChanged { v in
+                        model.seek(to: time(v.location.x))
+                    })
+
+                Color.clear.frame(width: 1, height: 1)
+                    .offset(x: x(model.playhead))
+                    .id("playhead")
+            }
+            .frame(width: width, height: height, alignment: .topLeading)
+            .offset(x: -scrollX, y: -scrollY)
+            .coordinateSpace(name: "timeline")
+            .onAppear {
+                viewport = CGSize(width: vpW, height: vpH)
+                model.timelineViewportWidth = vpW
+            }
+            .onChange(of: geo.size.width) { _, w in
+                viewport.width = w
+                model.timelineViewportWidth = w
+            }
+            .onChange(of: geo.size.height) { _, h in
+                viewport.height = h
+            }
+            .onChange(of: model.playhead) { _, t in
+                guard model.isPlaying else { return }
+                let px = x(t)
+                let maxX = max(0, width - vpW)
+                if px > scrollX + vpW * 0.9 || px < scrollX {
+                    scrollX = min(maxX, max(0, px - vpW * 0.1))
+                }
+            }
+        }
+        .background(Theme.window)
+        .clipped()
+        .onDrop(of: [.text, .fileURL], isTargeted: nil) { providers in
+            handleAssetDrop(providers, atX: nil)
+        }
+    }
+
+    private func trackBackground(y: CGFloat, height: CGFloat, width: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.025))
+            .frame(width: width, height: height)
+            .offset(y: y)
+            .allowsHitTesting(false)
+    }
+
+    // MARK: 主轨
+
+    private func textTrack(_ rows: Rows) -> some View {
+        let lanes = textLanes
+        return ForEach(model.project.texts) { clip in
+            TextClipView(model: model, clip: clip, pps: pps)
+                .offset(x: x(clip.start), y: rows.laneY(lanes[clip.id] ?? 0))
+        }
+    }
+
+    @ViewBuilder
+    private func mainTrack(width: CGFloat, y mainY: CGFloat) -> some View {
+        if model.project.mainTrack.isEmpty {
+            Text("把素材拖到这里，或在左侧素材库双击添加")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.tertiary)
+                .frame(width: min(width, 600), height: TL.main)
+                .background(RoundedRectangle(cornerRadius: Theme.corner).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(Theme.tertiary))
+                .offset(x: TL.leading, y: mainY)
+                .allowsHitTesting(false)
+        }
+        ForEach(model.layout.placements, id: \.clipID) { placement in
+            if let clip = model.project.mainClip(id: placement.clipID), let asset = model.project.asset(id: clip.assetID) {
+                MainClipView(model: model, clip: clip, asset: asset, placement: placement, pps: pps)
+                    .offset(x: x(placement.start), y: mainY)
+            }
+        }
+        ForEach(model.layout.placements.dropFirst(), id: \.clipID) { placement in
+            TransitionMarker(model: model, placement: placement)
+                .offset(x: x(placement.start + (placement.transitionIn?.duration ?? .zero) / 2) - 10, y: mainY + TL.main / 2 - 10)
+        }
+    }
+
+    private func duckRow(y: CGFloat) -> some View {
+        ForEach(model.project.duckRanges) { range in
+            DuckRangeView(model: model, range: range, pps: pps)
+                .offset(x: x(range.start), y: y)
+        }
+    }
+
+    private func musicTrack(_ rows: Rows) -> some View {
+        ForEach(model.project.musicTrack) { clip in
+            if let asset = model.project.asset(id: clip.assetID) {
+                MusicClipView(model: model, clip: clip, asset: asset, pps: pps, laneCount: rows.audioLanes)
+                    .offset(x: x(clip.start), y: rows.audioLaneY(clip.lane))
+            }
+        }
+    }
+
+    private func subtitleTrack(y: CGFloat) -> some View {
+        ForEach(model.project.subtitles) { sub in
+            SubtitleClipView(model: model, sub: sub, pps: pps)
+                .offset(x: x(sub.start), y: y)
+        }
+    }
+
+    private func handleAssetDrop(_ providers: [NSItemProvider], atX: CGFloat?) -> Bool {
+        for provider in providers {
+            // 资源池卡片 / Finder 拖进来的是文件 URL：导入素材库并直接上轨
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { obj, _ in
+                    let url: URL?
+                    switch obj {
+                    case let u as URL: url = u
+                    case let u as NSURL: url = u as URL?
+                    case let data as Data: url = URL(dataRepresentation: data, relativeTo: nil)
+                    case let s as String: url = URL(fileURLWithPath: s)
+                    default: url = nil
+                    }
+                    guard let url else { return }
+                    Task { @MainActor in
+                        await model.importFiles([url], addToTimeline: true)
+                    }
+                }
+                continue
+            }
+            _ = provider.loadObject(ofClass: NSString.self) { obj, _ in
+                guard let s = obj as? String, let id = AssetDrag.assetID(s) else { return }
+                Task { @MainActor in
+                    guard let asset = model.project.asset(id: id) else { return }
+                    model.store.perform { p in
+                        if asset.kind == .audio { p.addMusic(assetID: id, at: model.playhead) } else { p.appendToMain(assetID: id) }
+                    }
+                }
+            }
+        }
+        return true
+    }
+}
+
+// MARK: - 缩放
+
+/// 接收触控板捏合与 ⌘/⌥+滚轮缩放；把滚轮 / 双指滑动统一映射成横向（必要时纵向）平移，
+/// 直接驱动 TimelineView 的 scrollX / scrollY，并夹在 [0, maxX] / [0, maxY]。
+///
+/// 刻意不走 SwiftUI ScrollView：NavigationSplitView 详情列的 AppKit 容器 (PlatformContainer)
+/// 会把内部的 NSScrollView 撑到整窗宽并左移一个侧边栏宽度，造成双层滚动、多出滚动条、
+/// 普通横向滚动到不了最左（documentView 原点被带偏，Shift+滚轮走另一根轴反而能越界顶到）。
+/// 手动平移彻底绕开它：最左就是 scrollX = 0，不可能到不了；普通 / Shift 滚动同一套夹取。
+private struct ZoomEventCatcher: NSViewRepresentable {
+    let model: EditorModel
+    let pointsPerSecond: Double
+    @Binding var scrollX: CGFloat
+    @Binding var scrollY: CGFloat
+    let viewport: CGSize
+    let content: CGSize
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model, pointsPerSecond: pointsPerSecond) }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.pointsPerSecondChanged(to: pointsPerSecond)
+        context.coordinator.scrollX = $scrollX
+        context.coordinator.scrollY = $scrollY
+        context.coordinator.viewport = viewport
+        context.coordinator.content = content
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    @MainActor
+    final class Coordinator {
+        let model: EditorModel
+        weak var view: NSView?
+        private var monitor: Any?
+        private var lastPointsPerSecond: Double
+        var scrollX: Binding<CGFloat>?
+        var scrollY: Binding<CGFloat>?
+        var viewport: CGSize = .zero
+        var content: CGSize = .zero
+
+        init(model: EditorModel, pointsPerSecond: Double) {
+            self.model = model
+            lastPointsPerSecond = pointsPerSecond
+        }
+
+        func install() {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { [weak self] event in
+                // 本地事件监视器总在主线程回调；被缩放 / 平移消费的事件不再下传
+                nonisolated(unsafe) let e = event
+                let consumed = MainActor.assumeIsolated { self?.handle(e) ?? false }
+                return consumed ? nil : event
+            }
+        }
+
+        func uninstall() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        private func handle(_ event: NSEvent) -> Bool {
+            guard let view, event.window === view.window else { return false }
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard view.visibleRect.contains(point) else { return false }
+            switch event.type {
+            case .magnify:
+                zoom(by: 1 + event.magnification, at: point)
+                return true
+            case .scrollWheel where !event.modifierFlags.intersection([.command, .option]).isEmpty:
+                let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 8
+                zoom(by: TimelineZoom.factor(scrollDelta: dy), at: point)
+                return true
+            case .scrollWheel:
+                return pan(by: event)
+            default:
+                return false
+            }
+        }
+
+        /// 普通横向滑动 / Shift+滚轮（系统把 deltaY 换成 deltaX）/ 竖向滚轮（时间线纵向轴已关，
+        /// 映射成横向）统一走这里，保证两条路径用同一套边界夹取，不再出现「普通滚不到最左」。
+        private func pan(by event: NSEvent) -> Bool {
+            let dx = event.scrollingDeltaX
+            let dy = event.scrollingDeltaY
+            let precise = event.hasPreciseScrollingDeltas
+            var consumed = false
+            if dx != 0 {
+                panHorizontally(by: dx, precise: precise)
+                consumed = true
+            }
+            if dy != 0 {
+                if content.height > viewport.height + 1 {
+                    panVertically(by: dy, precise: precise)
+                } else {
+                    // 纵向轴已关（剪映同款）：竖向滚轮 / 双指竖滑映射成横向平移
+                    panHorizontally(by: dy, precise: precise)
+                }
+                consumed = true
+            }
+            return consumed
+        }
+
+        private func panHorizontally(by delta: CGFloat, precise: Bool) {
+            guard let scrollX else { return }
+            let step = precise ? delta : delta * 40
+            let maxX = max(0, content.width - viewport.width)
+            let x = min(maxX, max(0, scrollX.wrappedValue - step))
+            if abs(x - scrollX.wrappedValue) > 0.01 { scrollX.wrappedValue = x }
+        }
+
+        private func panVertically(by delta: CGFloat, precise: Bool) {
+            guard let scrollY else { return }
+            let step = precise ? delta : delta * 40
+            let maxY = max(0, content.height - viewport.height)
+            let y = min(maxY, max(0, scrollY.wrappedValue - step))
+            if abs(y - scrollY.wrappedValue) > 0.01 { scrollY.wrappedValue = y }
+        }
+
+        private func zoom(by factor: Double, at point: CGPoint) {
+            // point 已是内容坐标（catcher 与内容同处被平移的同一层），无需再叠加 scrollX
+            let anchor = Time(seconds: max(0, Double(point.x - TL.leading) / model.pointsPerSecond))
+            model.zoom(by: factor, anchor: anchor)
+        }
+
+        func pointsPerSecondChanged(to pps: Double) {
+            guard pps != lastPointsPerSecond else { return }
+            let old = lastPointsPerSecond
+            lastPointsPerSecond = pps
+            // 新 pps 下的文档宽度（与 body 里 width 同式）；锚点定位可能算出超过文档右端的
+            // origin，先夹进 [0, maxX] 再设置，否则内容整体左移
+            let newDocWidth = max(Double(content.width), Double(TL.leading) + model.duration.seconds * pps + 400)
+            let maxX = max(0, newDocWidth - Double(viewport.width))
+            let anchor = model.zoomAnchor ?? model.playhead
+            model.zoomAnchor = nil
+            let origin: CGFloat = model.zoomScrollsToStart ? 0
+                : min(CGFloat(maxX), max(0, CGFloat(TimelineZoom.scrollOrigin(anchor: anchor, oldPointsPerSecond: old, newPointsPerSecond: pps,
+                                                                          oldOrigin: Double(scrollX?.wrappedValue ?? 0), leading: Double(TL.leading)))))
+            model.zoomScrollsToStart = false
+            if let scrollX, abs(origin - scrollX.wrappedValue) > 0.01 { scrollX.wrappedValue = origin }
+        }
+    }
+}
+
+// 时间线滚动已改为「手动 offset 平移」（见 body 与 ZoomEventCatcher），
+// 旧的偏好键（ScrollXKey / TimelineGlobalFrameKey）与帧夹取器（ScrollOriginClamper /
+// ScrollClampView）已不再使用，整块删除。
+
+// MARK: - 时间尺
+
+private struct RulerView: View {
+    let pps: CGFloat
+    let width: CGFloat
+
+    var body: some View {
+        Canvas { ctx, size in
+            let candidates: [Double] = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
+            let major = candidates.first { $0 * Double(pps) >= 80 } ?? 1800
+            let minor = major / 5
+            let ticksPerMajor = 5
+            var i = 0
+            while TL.leading + CGFloat(Double(i) * minor) * pps < size.width {
+                let t = Double(i) * minor
+                let x = TL.leading + CGFloat(t) * pps
+                let isMajor = i % ticksPerMajor == 0
+                var path = Path()
+                path.move(to: CGPoint(x: x, y: size.height - (isMajor ? 10 : 5)))
+                path.addLine(to: CGPoint(x: x, y: size.height))
+                ctx.stroke(path, with: .color(Theme.tertiary), lineWidth: 1)
+                if isMajor {
+                    ctx.draw(Text(label(t, major: major)).font(.system(size: 9).monospacedDigit()).foregroundColor(Theme.secondary),
+                             at: CGPoint(x: x + 3, y: 4), anchor: .topLeading)
+                }
+                i += 1
+            }
+        }
+    }
+
+    private func label(_ t: Double, major: Double) -> String {
+        Time.rulerLabel(seconds: t, major: major)
+    }
+}
+
+private struct PlayheadView: View {
+    let height: CGFloat
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Path { p in
+                p.move(to: .zero)
+                p.addLine(to: CGPoint(x: 12, y: 0))
+                p.addLine(to: CGPoint(x: 12, y: 8))
+                p.addLine(to: CGPoint(x: 6, y: 14))
+                p.addLine(to: CGPoint(x: 0, y: 8))
+                p.closeSubpath()
+            }
+            .fill(Theme.playhead)
+            .frame(width: 12, height: 14)
+            Rectangle().fill(Theme.playhead).frame(width: 2, height: height - 14)
+        }
+        .frame(width: 12)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - 修剪手柄
+
+private struct TrimHandle: View {
+    let leading: Bool
+    let onChange: (CGFloat) -> Void
+    let onEnd: () -> Void
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color.white)
+            .frame(width: TL.handle)
+            .overlay(Rectangle().fill(Color.black.opacity(0.4)).frame(width: 2, height: 14))
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("timeline"))
+                .onChanged { onChange($0.translation.width) }
+                .onEnded { _ in onEnd() })
+    }
+}
+
+// MARK: - 视频片段
+
+private struct MainClipView: View {
+    @Bindable var model: EditorModel
+    let clip: VideoClip
+    let asset: MediaAsset
+    let placement: ClipPlacement
+    let pps: CGFloat
+
+    @State private var dragX: CGFloat = 0
+    @State private var trimStart: (Time, Time)?
+
+    private var selected: Bool { model.selection == .video(clip.id) }
+    private var width: CGFloat { max(4, CGFloat(placement.duration.seconds) * pps) }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ThumbnailStrip(asset: asset, clip: clip, width: width, height: TL.main, pps: pps)
+            LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .center)
+                .allowsHitTesting(false)
+            HStack(spacing: 4) {
+                if clip.speed != 1 {
+                    Text(String(format: "%.2gx", clip.speed)).font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 3).background(Theme.accent, in: RoundedRectangle(cornerRadius: 2)).foregroundStyle(.white)
+                }
+                if asset.hdr != nil { HDRBadge(small: true) }
+                if clip.muted { Image(systemName: "speaker.slash.fill").font(.system(size: 9)) }
+                if clip.filter.preset != .none { Image(systemName: "camera.filters").font(.system(size: 9)) }
+                Text(placement.duration.displayString).font(.system(size: 9).monospacedDigit())
+            }
+            .foregroundStyle(.white)
+            .padding(4)
+            .frame(width: width, alignment: .leading)
+            .clipped()
+            .allowsHitTesting(false)
+        }
+        .frame(width: width, height: TL.main)
+        .background(Theme.videoClip)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.corner))
+        .overlay(RoundedRectangle(cornerRadius: Theme.corner).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .overlay(alignment: .leading) { if selected { trimHandle(leading: true) } }
+        .overlay(alignment: .trailing) { if selected { trimHandle(leading: false) } }
+        .offset(x: dragX)
+        .zIndex(dragX != 0 ? 10 : (selected ? 5 : 0))
+        .opacity(dragX != 0 ? 0.85 : 1)
+        .onTapGesture { model.selection = .video(clip.id) }
+        .gesture(DragGesture(minimumDistance: 6, coordinateSpace: .named("timeline"))
+            .onChanged { v in
+                model.selection = .video(clip.id)
+                dragX = v.translation.width
+            }
+            .onEnded { v in
+                reorder(dropCenter: CGFloat(placement.start.seconds) * pps + width / 2 + v.translation.width)
+                dragX = 0
+            })
+        .contextMenu {
+            Button("在播放头处分割") { model.splitAtPlayhead() }
+            Button(clip.muted ? "取消静音" : "静音") { model.store.perform { $0.updateMain(id: clip.id) { $0.muted.toggle() } } }
+            Button("分离音频") { model.detachAudio(clip.id) }
+                .disabled(!model.project.canDetachAudio(id: clip.id))
+            Divider()
+            Button("复制调色") { model.selection = .video(clip.id); model.copyGrade() }
+            Button("粘贴调色") { model.selection = .video(clip.id); model.pasteGrade() }
+                .disabled(model.copiedFilter == nil)
+            Divider()
+            Button("删除", role: .destructive) { model.store.perform { $0.removeMain(id: clip.id) } }
+        }
+    }
+
+    private func trimHandle(leading: Bool) -> some View {
+        TrimHandle(leading: leading) { dx in
+            if trimStart == nil {
+                trimStart = (clip.sourceIn, clip.sourceOut)
+                model.store.beginCoalescing()
+            }
+            guard let (inT, outT) = trimStart else { return }
+            let delta = Time(seconds: Double(dx / pps) * clip.speed)
+            model.store.perform { p in
+                if leading { p.trimMain(id: clip.id, sourceIn: inT + delta, sourceOut: outT) } else { p.trimMain(id: clip.id, sourceIn: inT, sourceOut: outT + delta) }
+            }
+        } onEnd: {
+            trimStart = nil
+            model.store.endCoalescing()
+        }
+    }
+
+    /// 按拖放后片段中心点所在位置决定新顺序。
+    private func reorder(dropCenter: CGFloat) {
+        let placements = model.layout.placements
+        var target = placements.count - 1
+        for p in placements where p.clipID != clip.id {
+            let center = CGFloat(p.start.seconds + p.duration.seconds / 2) * pps
+            if dropCenter < center {
+                target = p.index > placement.index ? p.index - 1 : p.index
+                break
+            }
+        }
+        if target != placement.index { model.store.perform { $0.moveMain(id: clip.id, to: target) } }
+    }
+}
+
+private struct ThumbnailStrip: View {
+    let asset: MediaAsset
+    let clip: VideoClip
+    let width: CGFloat
+    let height: CGFloat
+    let pps: CGFloat
+
+    private var cellWidth: CGFloat {
+        let aspect = asset.height > 0 ? CGFloat(asset.width) / CGFloat(asset.height) : 16 / 9
+        return max(height * aspect, width / 40)
+    }
+
+    var body: some View {
+        let count = max(1, Int((width / cellWidth).rounded(.up)))
+        HStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { i in
+                let t = clip.sourceIn + Time(seconds: Double((CGFloat(i) + 0.5) * cellWidth / pps) * clip.speed)
+                ThumbnailCell(url: asset.url, time: asset.kind == .image ? .zero : Time.min(t, clip.sourceOut), height: height, hdr: asset.hdr)
+                    .frame(width: cellWidth, height: height)
+                    .clipped()
+            }
+        }
+        .frame(width: width, height: height, alignment: .leading)
+        .clipped()
+    }
+}
+
+private struct ThumbnailCell: View {
+    let url: URL
+    let time: Time
+    let height: CGFloat
+    let hdr: HDRFormat?
+    @State private var image: CGImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(decorative: image, scale: 1).resizable().scaledToFill()
+            }
+        }
+        .task(id: "\(url.path)|\(Int(time.seconds * 2))") {
+            image = await Thumbnails.shared.thumbnail(url: url, time: time, maxHeight: height, hdr: hdr)
+        }
+    }
+}
+
+private struct TransitionMarker: View {
+    @Bindable var model: EditorModel
+    let placement: ClipPlacement
+
+    private var selected: Bool { model.selection == .transition(placement.clipID) }
+
+    var body: some View {
+        Button {
+            model.selection = .transition(placement.clipID)
+        } label: {
+            Image(systemName: placement.transitionIn == nil ? "plus" : "arrow.left.arrow.right")
+                .font(.system(size: 9, weight: .bold))
+                .frame(width: 20, height: 20)
+                .background(RoundedRectangle(cornerRadius: 4).fill(placement.transitionIn == nil ? Color.black.opacity(0.6) : Theme.accent))
+                .foregroundStyle(Color.white)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : .clear, lineWidth: 2))
+                .rotationEffect(.degrees(placement.transitionIn == nil ? 45 : 0))
+        }
+        .buttonStyle(.plain)
+        .zIndex(20)
+        .help(placement.transitionIn.map { String(localized: "转场：\($0.kind.displayName)") } ?? String(localized: "添加转场"))
+    }
+}
+
+// MARK: - 音乐片段
+
+private struct MusicClipView: View {
+    @Bindable var model: EditorModel
+    let clip: AudioClip
+    let asset: MediaAsset
+    let pps: CGFloat
+    let laneCount: Int
+
+    @State private var peaks: [Float] = []
+    @State private var dragStart: AudioClip?
+
+    private var selected: Bool { model.selection == .music(clip.id) }
+    private var width: CGFloat { max(4, CGFloat(clip.duration.seconds) * pps) }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Canvas { ctx, size in
+                guard !peaks.isEmpty else { return }
+                let perSecond = 50.0
+                let from = Int(clip.sourceIn.seconds * perSecond)
+                let to = min(peaks.count, Int(clip.sourceOut.seconds * perSecond))
+                guard to > from else { return }
+                let step = max(1, Int(Double(to - from) / Double(size.width / 2)))
+                var path = Path()
+                var i = from
+                while i < to {
+                    let x = CGFloat(Double(i - from) / Double(to - from)) * size.width
+                    let h = CGFloat(peaks[i...min(to - 1, i + step - 1)].max() ?? 0) * (size.height - 16)
+                    path.addRect(CGRect(x: x, y: size.height - 4 - h, width: 1.2, height: h))
+                    i += step
+                }
+                ctx.fill(path, with: .color(Color.white.opacity(0.45)))
+            }
+            // 音量曲线：淡入淡出、人声避让、静音一目了然（满高为 100%）
+            Canvas { ctx, size in
+                let envelope = model.project.volumeEnvelope(for: clip)
+                guard envelope.points.count > 1, clip.duration > .zero else { return }
+                let top: CGFloat = 16, bottom = size.height - 3
+                var path = Path()
+                for (i, p) in envelope.points.enumerated() {
+                    let x = CGFloat((p.time - clip.start).seconds / clip.duration.seconds) * size.width
+                    let y = bottom - CGFloat(min(1, p.gain)) * (bottom - top)
+                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+                }
+                ctx.stroke(path, with: .color(Theme.playhead.opacity(0.85)), lineWidth: 1.2)
+            }
+            .allowsHitTesting(false)
+            HStack(spacing: 4) {
+                Image(systemName: "music.note").font(.system(size: 9))
+                Text(asset.name).font(.system(size: 10)).lineLimit(1)
+                if clip.muted || model.project.laneSettings(clip.lane).muted { Image(systemName: "speaker.slash.fill").font(.system(size: 9)) }
+                if clip.ducks { Image(systemName: "waveform.badge.minus").font(.system(size: 9)).help("有人声时调低") }
+            }
+            .foregroundStyle(.white)
+            .padding(4)
+        }
+        .frame(width: width, height: TL.music)
+        .background(Theme.musicClip)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.corner))
+        .overlay(RoundedRectangle(cornerRadius: Theme.corner).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .overlay(alignment: .leading) { if selected { handle(leading: true) } }
+        .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
+        .zIndex(selected ? 5 : 0)
+        .onTapGesture { model.selection = .music(clip.id) }
+        .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("timeline"))
+            .onChanged { v in
+                begin()
+                guard let s = dragStart else { return }
+                let start = s.start + Time(seconds: Double(v.translation.width / pps))
+                // 上下拖动换轨；拖到最下面一条轨之下时新建一条
+                let rowHeight = Double(TL.music + TL.laneGap)
+                let lane = min(laneCount, max(0, s.lane + Int((Double(v.translation.height) / rowHeight).rounded())))
+                model.store.perform { $0.updateMusic(id: clip.id) { $0.start = start; $0.lane = lane } }
+            }
+            .onEnded { _ in end() })
+        .task(id: asset.path) { peaks = await WaveformProvider.shared.peaks(url: asset.url) }
+        .contextMenu {
+            Button("在播放头处分割") { model.selection = .music(clip.id); model.splitAtPlayhead() }
+            Button(clip.muted ? "取消静音" : "静音") { model.store.perform { $0.updateMusic(id: clip.id) { $0.muted.toggle() } } }
+            Button(model.project.laneSettings(clip.lane).muted ? "取消整条轨静音" : "整条轨静音") {
+                model.store.perform { $0.updateAudioLane(clip.lane) { $0.muted.toggle() } }
+            }
+            Button(clip.ducks ? "有人声时不调低" : "有人声时调低") { model.store.perform { $0.updateMusic(id: clip.id) { $0.ducks.toggle() } } }
+            Divider()
+            Button("删除", role: .destructive) { model.store.perform { $0.removeMusic(id: clip.id) } }
+        }
+    }
+
+    private func begin() {
+        guard dragStart == nil else { return }
+        dragStart = clip
+        model.selection = .music(clip.id)
+        model.store.beginCoalescing()
+    }
+
+    private func end() {
+        dragStart = nil
+        model.store.endCoalescing()
+    }
+
+    private func handle(leading: Bool) -> some View {
+        TrimHandle(leading: leading) { dx in
+            begin()
+            guard let s = dragStart else { return }
+            let delta = Time(seconds: Double(dx / pps))
+            model.store.perform { p in
+                p.updateMusic(id: clip.id) { c in
+                    c.lane = s.lane // 拖回来时回到原来的轨
+                    if leading {
+                        let d = Time.max(Time.zero - s.sourceIn, Time.max(Time.zero - s.start, delta))
+                        c.start = s.start + d
+                        c.sourceIn = s.sourceIn + d
+                    } else {
+                        c.sourceOut = s.sourceOut + delta
+                    }
+                }
+            }
+        } onEnd: { end() }
+    }
+}
+
+// MARK: - 字幕片段
+
+private struct SubtitleClipView: View {
+    @Bindable var model: EditorModel
+    let sub: Subtitle
+    let pps: CGFloat
+
+    @State private var dragStart: Subtitle?
+
+    private var selected: Bool { model.selection == .subtitle(sub.id) }
+    private var width: CGFloat { max(4, CGFloat(sub.duration.seconds) * pps) }
+
+    var body: some View {
+        Text(sub.text)
+            .font(.system(size: 10))
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .frame(width: width, height: TL.subtitle, alignment: .leading)
+            .foregroundStyle(.white)
+            .background(Theme.subtitleClip)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+            .overlay(alignment: .leading) { if selected { handle(leading: true) } }
+            .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
+            .zIndex(selected ? 5 : 0)
+            .onTapGesture {
+                model.selection = .subtitle(sub.id)
+                model.seek(to: sub.start)
+            }
+            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("timeline"))
+                .onChanged { v in
+                    begin()
+                    guard let s = dragStart else { return }
+                    let d = Time.max(Time.zero - s.start, Time(seconds: Double(v.translation.width / pps)))
+                    model.store.perform { $0.updateSubtitle(id: sub.id) { $0.start = s.start + d; $0.end = s.end + d } }
+                }
+                .onEnded { _ in end() })
+            .contextMenu { SubtitleContextMenu(model: model, sub: sub) }
+            .help(sub.text)
+    }
+
+    private func begin() {
+        guard dragStart == nil else { return }
+        dragStart = sub
+        model.selection = .subtitle(sub.id)
+        model.store.beginCoalescing()
+    }
+
+    private func end() {
+        dragStart = nil
+        model.store.endCoalescing()
+    }
+
+    private func handle(leading: Bool) -> some View {
+        TrimHandle(leading: leading) { dx in
+            begin()
+            guard let s = dragStart else { return }
+            let delta = Time(seconds: Double(dx / pps))
+            model.store.perform { p in
+                p.updateSubtitle(id: sub.id) { c in
+                    if leading { c.start = Time.min(s.end - EditLimits.minClipDuration, s.start + delta) } else { c.end = s.end + delta }
+                }
+            }
+        } onEnd: { end() }
+    }
+}
+
+// MARK: - 文字片段
+
+private struct TextClipView: View {
+    @Bindable var model: EditorModel
+    let clip: TextClip
+    let pps: CGFloat
+
+    @State private var dragStart: TextClip?
+
+    private var selected: Bool { model.selection == .text(clip.id) }
+    private var width: CGFloat { max(4, CGFloat(clip.duration.seconds) * pps) }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "textformat").latinSymbol().font(.system(size: 9))
+            Text(clip.text).font(.system(size: 10)).lineLimit(1)
+        }
+        .padding(.horizontal, 5)
+        .frame(width: width, height: TL.text, alignment: .leading)
+        .foregroundStyle(.white)
+        .background(Theme.textClip)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .overlay(alignment: .leading) { if selected { handle(leading: true) } }
+        .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
+        .zIndex(selected ? 5 : 0)
+        .onTapGesture {
+            model.selection = .text(clip.id)
+            if !(clip.start <= model.playhead && model.playhead < clip.end) { model.seek(to: clip.start + clip.duration / 2) }
+        }
+        .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("timeline"))
+            .onChanged { v in
+                begin()
+                guard let s = dragStart else { return }
+                let d = Time.max(Time.zero - s.start, Time(seconds: Double(v.translation.width / pps)))
+                model.store.perform { $0.updateText(id: clip.id) { $0.start = s.start + d; $0.end = s.end + d } }
+            }
+            .onEnded { _ in end() })
+        .contextMenu {
+            Button("复制一份") { model.duplicateText(clip.id) }
+            Divider()
+            Button("删除", role: .destructive) { model.removeText(clip.id) }
+        }
+        .help(clip.text)
+    }
+
+    private func begin() {
+        guard dragStart == nil else { return }
+        dragStart = clip
+        model.selection = .text(clip.id)
+        model.store.beginCoalescing()
+    }
+
+    private func end() {
+        dragStart = nil
+        model.store.endCoalescing()
+    }
+
+    private func handle(leading: Bool) -> some View {
+        TrimHandle(leading: leading) { dx in
+            begin()
+            guard let s = dragStart else { return }
+            let delta = Time(seconds: Double(dx / pps))
+            model.store.perform { p in
+                p.updateText(id: clip.id) { c in
+                    if leading { c.start = Time.min(s.end - EditLimits.minClipDuration, s.start + delta) } else { c.end = s.end + delta }
+                }
+            }
+        } onEnd: { end() }
+    }
+}
+
+// MARK: - 人声区间
+
+private struct DuckRangeView: View {
+    @Bindable var model: EditorModel
+    let range: DuckRange
+    let pps: CGFloat
+
+    @State private var dragStart: DuckRange?
+
+    private var selected: Bool { model.selection == .duck(range.id) }
+    private var width: CGFloat { max(4, CGFloat(range.duration.seconds) * pps) }
+
+    var body: some View {
+        Text(width > 36 ? "人声" : "")
+            .font(.system(size: 9))
+            .padding(.horizontal, 4)
+            .frame(width: width, height: TL.duck, alignment: .leading)
+            .foregroundStyle(.white)
+            .background(Theme.duckRange)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+            .overlay(alignment: .leading) { if selected { handle(leading: true) } }
+            .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
+            .zIndex(selected ? 5 : 0)
+            .onTapGesture { model.selection = .duck(range.id) }
+            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("timeline"))
+                .onChanged { v in
+                    begin()
+                    guard let s = dragStart else { return }
+                    let d = Time.max(Time.zero - s.start, Time(seconds: Double(v.translation.width / pps)))
+                    model.store.perform { $0.updateDuckRange(id: range.id) { $0.start = s.start + d; $0.end = s.end + d } }
+                }
+                .onEnded { _ in end() })
+            .contextMenu {
+                Button("删除", role: .destructive) { model.store.perform { $0.removeDuckRange(id: range.id) } }
+            }
+            .help("人声区间：开启了避让的音频在这里调低")
+    }
+
+    private func begin() {
+        guard dragStart == nil else { return }
+        dragStart = range
+        model.selection = .duck(range.id)
+        model.store.beginCoalescing()
+    }
+
+    private func end() {
+        dragStart = nil
+        model.store.endCoalescing()
+    }
+
+    private func handle(leading: Bool) -> some View {
+        TrimHandle(leading: leading) { dx in
+            begin()
+            guard let s = dragStart else { return }
+            let delta = Time(seconds: Double(dx / pps))
+            model.store.perform { p in
+                p.updateDuckRange(id: range.id) { r in
+                    if leading { r.start = Time.min(s.end - EditLimits.minClipDuration, s.start + delta) } else { r.end = s.end + delta }
+                }
+            }
+        } onEnd: { end() }
+    }
+}

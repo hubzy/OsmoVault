@@ -5,6 +5,7 @@ enum SidebarItem: Hashable {
     case library
     case map
     case quickCut
+    case videoEditor
     case trash
     case duplicates
     case smartAlbum(String)
@@ -106,6 +107,9 @@ struct SidebarView: View {
             Section("工具") {
                 row(icon: "scissors", title: "一键出片")
                     .tag(SidebarItem.quickCut)
+                // 完整剪辑台（移植自 FrameCut）：分割 / 变速 / 调色 / 字幕 / 音乐 / 导出
+                row(icon: "film.stack", title: "剪辑台")
+                    .tag(SidebarItem.videoEditor)
                 // 同一段视频被从两个路径导入后没法区分，这里集中处理
                 row(icon: "doc.on.doc", title: "重复素材", count: duplicateCount,
                     empty: duplicateCount == 0)

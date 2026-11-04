@@ -67,6 +67,9 @@ private extension Font {
 struct QuickCutPanel: View {
     @EnvironmentObject var appModel: AppModel
 
+    /// 「送入剪辑台」后切页（由 MainWindowView 注入，切换到剪辑台 section）
+    var onOpenEditor: (() -> Void)? = nil
+
     @StateObject private var preview = QuickCutPreviewController()
 
     /// 素材池勾选（剪映式：点击即勾选/取消，拖已勾选卡片会带走全部已勾选素材）
@@ -238,6 +241,15 @@ struct QuickCutPanel: View {
                 .font(.qcCaption).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.tail)
             Spacer()
+            // 粗剪完成 → 送进剪辑台精修（顺序 / 起止 / 变速 / 转场原样保留）
+            Button {
+                sendToEditor()
+            } label: {
+                Label("送入剪辑台", systemImage: "film.stack")
+            }
+            .controlSize(.small)
+            .disabled(segments.isEmpty)
+            .help("把当前时间线原样送进剪辑台继续精修：调色、字幕、音乐、更多转场、逐帧修剪")
             if isExporting {
                 ProgressView().controlSize(.small)
                 Text(String(format: "%.0f%%", progressValue * 100))
@@ -1334,6 +1346,16 @@ struct QuickCutPanel: View {
         preview.unload()
         prepared = nil
         builtSignature = nil
+    }
+
+    // MARK: - 送入剪辑台
+
+    /// 粗剪的时间线交给剪辑台（FrameCut 引擎）继续精修。
+    /// 顺序 / 起止 / 变速 / 交叉溶解原样搬过去；那边随便改，随时可撤销。
+    private func sendToEditor() {
+        guard !segments.isEmpty else { return }
+        appModel.videoEditor.openProject(fromSegments: segments, transitionDuration: transitionSeconds)
+        onOpenEditor?()
     }
 
     private func exportAll() {

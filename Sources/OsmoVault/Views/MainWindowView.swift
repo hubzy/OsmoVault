@@ -58,7 +58,7 @@ struct MainWindowView: View {
 
     private func showsDetailPane(_ item: SidebarItem?) -> Bool {
         switch item {
-        case .trash, .quickCut: return false
+        case .trash, .quickCut, .videoEditor: return false
         default: return true
         }
     }
@@ -126,6 +126,10 @@ struct MainWindowView: View {
             } else {
                 // 其余页面（含同列换集合）一律停播，避免"人已经走了声音还在"
                 playerController.pause()
+            }
+            // 离开剪辑台时把预览播放也停掉（编辑器的 AVPlayer 独立于视图生命周期）
+            if case .videoEditor = newValue {} else {
+                appModel.videoEditor.editor?.pausePlayback()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -321,7 +325,10 @@ struct MainWindowView: View {
         case .trash:
             TrashView()
         case .quickCut:
-            QuickCutPanel()
+            QuickCutPanel(onOpenEditor: { section = .videoEditor })
+        case .videoEditor:
+            // 剪辑台是自成一体的一整页（深色，FrameCut 编辑器全家桶）
+            VideoEditorPage()
         case .duplicates:
             DuplicateView(onOpen: { selectedAssetID = $0 })
         case .map:

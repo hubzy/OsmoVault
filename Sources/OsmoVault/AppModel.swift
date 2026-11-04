@@ -26,8 +26,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var importHistory: [ImportRecord] = []
     /// 「截取实况图」的结果提示，由 MainWindowView 显示
     @Published var grabStatus: String?
-    /// 自动刷新（监听文件夹）的结果提示，几秒后自己消失
+    /// 「自动刷新（监听文件夹）」的结果提示，几秒后自己消失
     @Published var autoRefreshStatus: String?
+
+    /// 剪辑台会话（FrameCut 引擎）：工程打开 / 关闭 / 最近工程 + 素材入轨桥。
+    /// 由 AppModel 持有一份，跨页面切换保持工程不丢
+    let videoEditor = VideoEditorSession()
 
     let database: AppDatabase
     private var placeNameTask: Task<Void, Never>?
@@ -66,6 +70,12 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .background) {
             try? await Task.sleep(nanoseconds: 5_000_000_000)   // 避开启动高峰
             MotionPhoto.trimCache()
+        }
+        // 退出前保存剪辑工程（AppDelegate 发通知过来）
+        NotificationCenter.default.addObserver(
+            forName: .osmoVaultWillTerminate, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.videoEditor.editor?.save() }
         }
     }
 

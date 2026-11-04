@@ -559,6 +559,7 @@ struct ScanStatusBar: View {
 }
 
 /// 左右两栏 + 可拖动分割条。宽度记在 UserDefaults 里，下次启动自动恢复。
+/// （一键出片页也复用这个组件分「素材池 | 预览」两列，所以是 internal）
 ///
 /// 之前"不好拖、不丝滑"的三个原因，这里逐个处理：
 /// 1. **必须用 `.global` 坐标空间**。`DragGesture` 默认是 `.local`，也就是以被拖视图自身
@@ -568,7 +569,7 @@ struct ScanStatusBar: View {
 ///    会让上层 `body` 整棵树重算（时间轴里是几千张卡），一帧一帧掉下去就是卡顿。
 /// 3. **用增量 + 夹取**（而不是"起点 + 总位移"）：拖到最小/最大宽度卡住后反向立刻跟手，
 ///    不存在要先把越界的位移"退回来"的死区。
-private struct ResizableSplit<Leading: View, Trailing: View>: View {
+struct ResizableSplit<Leading: View, Trailing: View>: View {
     enum Side {
         /// 受控列在左（图库：缩略图列宽度可变）
         case leading

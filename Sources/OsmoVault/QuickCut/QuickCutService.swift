@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import CoreMedia
 
-/// 一条出片片段：源素材 + 起止时间
+/// 一条出片片段：源素材 + 起止时间 + 变速倍率
 struct CutSegment: Identifiable, Codable, Equatable {
     var id = UUID()
     let assetID: Int64
@@ -10,7 +10,10 @@ struct CutSegment: Identifiable, Codable, Equatable {
     let fileName: String
     var start: Double
     var end: Double
-    var duration: Double { max(end - start, 0.1) }
+    /// 变速 0.25x–4x（音频随速变调，导出管线暂不做原调保持）
+    var speed: Double = 1
+    /// 该片段在**时间轴上**占用的秒数（源时长 ÷ 变速）
+    var duration: Double { max((end - start) / min(max(speed, 0.25), 4), 0.1) }
 }
 
 /// 出片配置
@@ -76,12 +79,14 @@ enum QuickCutService {
         let mediaRange: CMTimeRange
     }
 
-    /// 将片段按顺序拼成时间线（导出、预览共用，保证两边效果一致）
+    /// 将片段按顺序拼成时间线（导出、预览共用，保证两边效果一致）。
+    /// 变速片段：按源区间插入后用 `scaleTimeRange` 压缩到目标时长（音画同步缩放）。
     static func prepare(segments: [CutSegment], config: QuickCutConfig) throws -> PreparedTimeline {
         guard !segments.isEmpty else { throw QuickCutError.empty }
 
         // 1. 解析源素材，并把用户填的起止时间夹到真实时长范围内
         var sources: [Source] = []
+        var speeds: [Double] = []
         for seg in segments {
             let av = AVURLAsset(url: URL(fileURLWithPath: seg.sourcePath))
             guard let v = av.tracks(withMediaType: .video).first else { continue }
@@ -96,14 +101,20 @@ enum QuickCutService {
             sources.append(Source(asset: av, videoTrack: v,
                                   audioTrack: av.tracks(withMediaType: .audio).first,
                                   mediaRange: range))
+            speeds.append(min(max(seg.speed, 0.25), 4))
         }
         guard !sources.isEmpty else { throw QuickCutError.noVideoTrack }
+
+        // 每段在时间轴上的时长（源时长 ÷ 变速）
+        let timelineDurations: [CMTime] = sources.indices.map { i in
+            CMTimeMultiplyByFloat64(sources[i].mediaRange.duration, multiplier: 1 / speeds[i])
+        }
 
         // 2. 编排时间轴：转场时长不能超过最短片段的 45%，否则会算出负长度的时间区间
         var transition = CMTime(seconds: max(config.transitionDuration, 0), preferredTimescale: 600)
         let crossfade = transition > .zero && sources.count > 1
         if crossfade {
-            let shortest = sources.map { $0.mediaRange.duration }.min() ?? .zero
+            let shortest = timelineDurations.min() ?? .zero
             transition = CMTimeMinimum(transition, CMTimeMultiplyByFloat64(shortest, multiplier: 0.45))
         } else {
             transition = .zero
@@ -115,7 +126,7 @@ enum QuickCutService {
         for (i, s) in sources.enumerated() {
             if i > 0 { cursor = cursor - transition }
             positions.append(cursor)
-            cursor = cursor + s.mediaRange.duration
+            cursor = cursor + timelineDurations[i]
         }
         let total = cursor
         guard total > .zero else { throw QuickCutError.zeroLength }
@@ -137,6 +148,15 @@ enum QuickCutService {
                let at = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
                 try? at.insertTimeRange(s.mediaRange, of: a, at: positions[i])
                 audioTracks.append(at)
+                // 变速：把刚插入的音画同步压缩到 timelineDurations[i]
+                if speeds[i] != 1 {
+                    let inserted = CMTimeRange(start: positions[i], duration: s.mediaRange.duration)
+                    try? vt.scaleTimeRange(inserted, toDuration: timelineDurations[i])
+                    try? at.scaleTimeRange(inserted, toDuration: timelineDurations[i])
+                }
+            } else if speeds[i] != 1 {
+                let inserted = CMTimeRange(start: positions[i], duration: s.mediaRange.duration)
+                try? vt.scaleTimeRange(inserted, toDuration: timelineDurations[i])
             }
         }
 
@@ -159,7 +179,7 @@ enum QuickCutService {
         var instructions: [AVMutableVideoCompositionInstruction] = []
         for i in sources.indices {
             let p = positions[i]
-            let d = sources[i].mediaRange.duration
+            let d = timelineDurations[i]
             // 该片段独占的区间（不含前后转场）
             let soloStart = i == 0 ? CMTime.zero : p + transition
             let soloEnd = i == sources.count - 1 ? p + d : p + d - transition

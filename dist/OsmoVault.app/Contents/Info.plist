@@ -30,5 +30,30 @@
 	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.photography</string>
+	<!-- 一键出片页的 App 内拖放类型：UTType(exportedAs:) 运行时注册之外，
+	     再在 bundle 层正式声明一次，保证 onDrop 的系统校验在所有场景都能匹配 -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.osmovault.asset</string>
+			<key>UTTypeDescription</key>
+			<string>OsmoVault 素材拖放载荷</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.osmovault.clip</string>
+			<key>UTTypeDescription</key>
+			<string>OsmoVault 时间轴片段拖放载荷</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

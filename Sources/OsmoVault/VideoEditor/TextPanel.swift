@@ -1,3 +1,5 @@
+import AppKit
+import CoreImage
 import FCCore
 import FCEngine
 import SwiftUI
@@ -112,7 +114,7 @@ private struct PresetCard: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 6).fill(LinearGradient(colors: [Color(white: 0.28), Color(white: 0.16)], startPoint: .top, endPoint: .bottom))
+                    RoundedRectangle(cornerRadius: 6).fill(LinearGradient(colors: [Theme.previewTop, Theme.previewBottom], startPoint: .top, endPoint: .bottom))
                     Text(preset.text)
                         .font(.custom(preset.style.fontName, size: 15))
                         .lineLimit(1)
@@ -144,7 +146,14 @@ struct TextInspector: View {
     let id: UUID
 
     private func style<T>(_ kp: WritableKeyPath<SubtitleStyle, T>) -> Binding<T> {
-        model.textBinding(id, (\TextClip.style).appending(path: kp), default: TextClip.defaultStyle[keyPath: kp])
+        Binding(
+            // 拖动期间位置还没写进工程，检查器读实时样式才不会停在旧数值上
+            get: {
+                let live = model.liveText?.id == id ? model.liveText?.style : nil
+                return (live ?? model.project.text(id: id)?.style ?? TextClip.defaultStyle)[keyPath: kp]
+            },
+            set: { value in model.store.perform { $0.updateText(id: id) { $0.style[keyPath: kp] = value } } }
+        )
     }
 
     private var duration: Binding<Double> {
@@ -155,17 +164,15 @@ struct TextInspector: View {
     }
 
     var body: some View {
-        InspectorHeader(title: "文字", icon: "textformat")
+        // 标题 / 时间范围由 InspectorPanel 的固定头部统一显示，这里只放内容
         TextField("文字内容", text: model.textBinding(id, \.text, default: ""), axis: .vertical)
             .textFieldStyle(.roundedBorder)
             .lineLimit(1...5)
-        if let clip = model.project.text(id: id) {
-            Text("\(clip.start.displayString) – \(clip.end.displayString)")
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.secondary)
-        }
-        VStack(alignment: .leading, spacing: 10) {
+
+        InspectorGroup("内容与动画", key: "text.basic") {
             LabeledSlider(title: "时长", value: duration, range: 0.5...15,
-                          format: { String(format: String(localized: "%.1f 秒"), $0) }, onEditing: model.coalesce)
+                          format: { String(format: String(localized: "%.1f 秒"), $0) },
+                          onEditing: model.coalesce, resetValue: TextClip.defaultDuration.seconds)
             Picker("动画", selection: model.textBinding(id, \.animation, default: .fade)) {
                 ForEach(TextAnimation.allCases, id: \.self) { Text($0.displayName).tag($0) }
             }
@@ -174,19 +181,21 @@ struct TextInspector: View {
                 ForEach(TextPreset.fonts, id: \.0) { Text($0.1).tag($0.0) }
             }
             .font(.system(size: 12))
+        }
+
+        InspectorGroup("位置与样式", key: "text.style") {
             LabeledSlider(title: "字号", value: style(\.fontSize), range: TextClip.fontSizeRange,
-                          format: { "\(Int($0 * 1000))" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 1000))" }, onEditing: model.coalesce,
+                          resetValue: TextClip.defaultStyle.fontSize)
             LabeledSlider(title: "上下位置", value: style(\.verticalPosition), range: 0...1,
-                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
-            HStack(alignment: .bottom, spacing: 8) {
-                LabeledSlider(title: "左右位置", value: style(\.horizontalPosition), range: 0...1,
-                              format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
-                Button("居中") { model.store.perform { $0.updateText(id: id) { $0.style.horizontalPosition = 0.5 } } }
-                    .buttonStyle(PanelButtonStyle())
-                    .disabled(model.project.text(id: id)?.style.horizontalPosition == 0.5)
-            }
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce,
+                          resetValue: TextClip.defaultStyle.verticalPosition)
+            LabeledSlider(title: "左右位置", value: style(\.horizontalPosition), range: 0...1,
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce,
+                          resetValue: TextClip.defaultStyle.horizontalPosition)
             LabeledSlider(title: "描边粗细", value: style(\.strokeWidth), range: 0...0.3,
-                          format: { "\(Int($0 * 100))" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 100))" }, onEditing: model.coalesce,
+                          resetValue: TextClip.defaultStyle.strokeWidth)
             HStack(spacing: 14) {
                 ColorPicker("文字", selection: colorBinding(style(\.textColor)), supportsOpacity: false)
                 ColorPicker("描边", selection: colorBinding(style(\.strokeColor)), supportsOpacity: true)
@@ -194,7 +203,8 @@ struct TextInspector: View {
             }
             .font(.system(size: 12))
         }
-        Text("也可以在预览画面里直接拖动文字调整位置，拖右下角调整大小。")
+
+        Text("也可以在预览画面里直接拖动文字调整位置，拖右下角调整大小。数值前的圆点可复位（左右位置即水平居中），也可以直接键入数值。")
             .font(.system(size: 11)).foregroundStyle(Theme.tertiary)
             .fixedSize(horizontal: false, vertical: true)
         HStack(spacing: 8) {
@@ -217,6 +227,18 @@ struct TextOverlay: View {
         if !model.isPlaying, !model.comparingOriginal {
             let t = model.playhead
             ZStack(alignment: .topLeading) {
+                // 拖动中的文字由 SwiftUI 直接画（和视频渲染器同一张位图），
+                // 不经过 videoComposition 重建 + 精确 seek，鼠标怎么动它就怎么动。
+                // Group 固定占一个子视图位置：条件出现 / 消失不会挪动 ForEach 的
+                // 结构身份，否则 TextBox 的 @State（拖动起点）会被重置。
+                Group {
+                    if let live = model.liveText,
+                       let clip = model.project.text(id: live.id),
+                       clip.start <= t, t < clip.end {
+                        LiveTextLayer(clip: clip, style: live.style, canvas: canvas, at: t)
+                            .allowsHitTesting(false)
+                    }
+                }
                 ForEach(model.project.texts.filter { $0.start <= t && t < $0.end }) { clip in
                     if model.previewEditing == clip.id {
                         // 文字删空时没有排版结果，编辑框留在原位置
@@ -240,6 +262,8 @@ private struct TextBox: View {
     let canvas: CGSize
 
     @State private var dragStart: SubtitleStyle?
+    /// 拖动中的实时样式：只驱动视图，不写工程，选框和文字都即时跟手。
+    @State private var dragStyle: SubtitleStyle?
     @State private var resizeStart: (size: Double, distance: CGFloat)?
     @State private var pinchStart: Double?
     @State private var snap: (x: Bool, y: Bool) = (false, false)
@@ -250,7 +274,13 @@ private struct TextBox: View {
 
     private var selected: Bool { model.selection == .text(clip.id) }
 
+    /// 拖动中用实时样式算位置，避免「改工程 → 等整棵视图树重算」的往返。
+    private var boxRect: CGRect {
+        (dragStyle ?? clip.style).frame(textSize: rect.size, canvas: canvas)
+    }
+
     var body: some View {
+        let r = boxRect
         let active = hovering || dragStart != nil || resizeStart != nil || selected
         ZStack(alignment: .topLeading) {
             if snap.x {
@@ -263,22 +293,22 @@ private struct TextBox: View {
                 RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(active ? Theme.accent : Color.clear, style: StrokeStyle(lineWidth: 1, dash: selected ? [] : [3]))
                     .contentShape(Rectangle())
-                    .frame(width: rect.width + 8, height: rect.height + 8)
+                    .frame(width: r.width + 8, height: r.height + 8)
                     .onTapGesture(count: 2) { model.beginPreviewEditing(.text(clip.id), id: clip.id) }
                     .onTapGesture { model.selection = .text(clip.id) }
                     .gesture(moveGesture)
                     .simultaneousGesture(pinchGesture)
                     .help("双击修改文字，拖动调整位置，拖右下角或双指捏合调整大小")
                 Circle().fill(Theme.accent)
-                    .overlay(Circle().stroke(.white, lineWidth: 1))
+                    .onContentHandleRing()
                     .frame(width: 10, height: 10)
                     .opacity(active ? 1 : 0)
                     .contentShape(Rectangle().inset(by: -6))
                     .offset(x: 5, y: 5)
-                    .gesture(resizeGesture)
+                    .gesture(resizeGesture(r))
             }
             .onHover { hovering = $0 }
-            .offset(x: rect.minX - 4, y: rect.minY - 4)
+            .offset(x: r.minX - 4, y: r.minY - 4)
         }
         .onDisappear { hovering = false }
     }
@@ -287,34 +317,52 @@ private struct TextBox: View {
         model.store.perform { $0.updateText(id: clip.id) { body(&$0.style) } }
     }
 
+    /// 由固定坐标空间里的鼠标位移算出新位置（含中线吸附）。
+    private func position(start: SubtitleStyle, dx: CGFloat, dy: CGFloat) -> (x: Double, y: Double) {
+        var x = start.horizontalPosition * canvas.width + dx
+        var y = start.verticalPosition * canvas.height + dy
+        let sx = abs(x - canvas.width / 2) < snapDistance
+        let sy = abs(y - canvas.height / 2) < snapDistance
+        if sx { x = canvas.width / 2 }
+        if sy { y = canvas.height / 2 }
+        snap = (sx, sy)
+        return (min(1, max(0, x / canvas.width)), min(1, max(0, y / canvas.height)))
+    }
+
     private var moveGesture: some Gesture {
-        DragGesture(minimumDistance: 2)
+        // 用画布这个固定坐标空间：选框自己跟着移动时，位移基准也不会漂
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("subtitleCanvas"))
             .onChanged { v in
+                let dx = v.location.x - v.startLocation.x
+                let dy = v.location.y - v.startLocation.y
                 if dragStart == nil {
                     dragStart = clip.style
                     model.selection = .text(clip.id)
-                    model.store.beginCoalescing()
+                    model.beginLiveText(clip)
                 }
                 guard let start = dragStart else { return }
-                var x = start.horizontalPosition * canvas.width + v.translation.width
-                var y = start.verticalPosition * canvas.height + v.translation.height
-                snap = (abs(x - canvas.width / 2) < snapDistance, abs(y - canvas.height / 2) < snapDistance)
-                if snap.x { x = canvas.width / 2 }
-                if snap.y { y = canvas.height / 2 }
-                update {
-                    $0.horizontalPosition = min(1, max(0, x / canvas.width))
-                    $0.verticalPosition = min(1, max(0, y / canvas.height))
-                }
+                let p = position(start: start, dx: dx, dy: dy)
+                var s = clip.style
+                s.horizontalPosition = p.x
+                s.verticalPosition = p.y
+                dragStyle = s
+                model.updateLiveText(id: clip.id, x: p.x, y: p.y)
             }
-            .onEnded { _ in
+            .onEnded { v in
+                let dx = v.location.x - v.startLocation.x
+                let dy = v.location.y - v.startLocation.y
+                if let start = dragStart {
+                    let p = position(start: start, dx: dx, dy: dy)
+                    model.endLiveText(id: clip.id, x: p.x, y: p.y)
+                }
                 dragStart = nil
+                dragStyle = nil
                 snap = (false, false)
-                model.store.endCoalescing()
             }
     }
 
     /// 拖角缩放：按手指到文字中心的距离变化等比缩放字号。
-    private var resizeGesture: some Gesture {
+    private func resizeGesture(_ rect: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .named("subtitleCanvas"))
             .onChanged { v in
                 let center = CGPoint(x: rect.midX, y: rect.midY)
@@ -353,5 +401,55 @@ private struct TextBox: View {
 
     private func clamp(_ size: Double) -> Double {
         min(TextClip.fontSizeRange.upperBound, max(TextClip.fontSizeRange.lowerBound, size))
+    }
+}
+
+// MARK: - 拖动时顶替视频层的文字
+
+/// 直接画渲染器生成的那张位图：字号、描边、背景、动画与视频帧一致，但位置每帧即时更新。
+private struct LiveTextLayer: View {
+    let clip: TextClip
+    let style: SubtitleStyle
+    let canvas: CGSize
+    let at: Time
+
+    var body: some View {
+        let look = clip.appearance(at: at)
+        if look.opacity > 0.001, look.visibleCharacters != 0,
+           let cg = LiveTextBitmap.shared.image(text: clip.text, style: style, canvas: canvas,
+                                                visible: look.visibleCharacters),
+           cg.width > 0, cg.height > 0 {
+            let rect = style.frame(textSize: CGSize(width: cg.width, height: cg.height), canvas: canvas)
+            Image(nsImage: NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)))
+                .resizable()
+                .frame(width: rect.width, height: rect.height)
+                .scaleEffect(CGFloat(look.scale))
+                .offset(y: CGFloat(look.offsetY) * canvas.height)
+                .opacity(look.opacity)
+                .position(x: rect.midX, y: rect.midY)
+        }
+    }
+}
+
+/// 位图缓存：拖动只改位置，文字 / 字号 / 画布不变时不重复栅格化、不重复转 CGImage。
+private final class LiveTextBitmap {
+    static let shared = LiveTextBitmap()
+    private let context = CIContext()
+    private var key = ""
+    private var cg: CGImage?
+
+    func image(text: String, style: SubtitleStyle, canvas: CGSize, visible: Int?) -> CGImage? {
+        var look = style
+        look.horizontalPosition = 0
+        look.verticalPosition = 0
+        let key = "\(text)|\(look.hashValue)|\(Int(canvas.width))x\(Int(canvas.height))|\(visible.map { String($0) } ?? "all")"
+        if key == self.key { return cg }
+        let out = SubtitleRenderer.image(text: text, style: style, canvas: canvas,
+                                        visibleCharacters: visible).flatMap {
+            context.createCGImage($0, from: $0.extent)
+        }
+        self.key = key
+        cg = out
+        return out
     }
 }

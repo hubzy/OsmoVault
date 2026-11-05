@@ -16,11 +16,10 @@ struct AudioLaneSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionTitle("音频轨 \(lane + 1)（整条轨）")
+        InspectorGroup("音频轨 \(lane + 1)（整条轨）", key: "audio.lane") {
             Toggle("整条轨静音", isOn: binding(\.muted)).font(.system(size: 12))
             LabeledSlider(title: "轨道音量", value: binding(\.volume), range: 0...2,
-                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce, resetValue: 1)
         }
     }
 }
@@ -38,16 +37,16 @@ struct DuckingSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionTitle("人声避让")
+        InspectorGroup("人声避让", key: "audio.duck") {
             if let clipID {
                 Toggle("有人声时调低这段音频", isOn: model.musicBinding(clipID, \.ducks, default: false))
                     .font(.system(size: 12))
             }
             LabeledSlider(title: "调低到", value: duck(\.level), range: DuckSettings.levelRange,
-                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce, resetValue: 0.3)
             LabeledSlider(title: "渐变", value: duck(\.fade), range: DuckSettings.fadeRange,
-                          format: { String(format: String(localized: "%.1f 秒"), $0) }, onEditing: model.coalesce)
+                          format: { String(format: String(localized: "%.1f 秒"), $0) },
+                          onEditing: model.coalesce, resetValue: 0.3)
             Text(model.project.duckRanges.isEmpty
                  ? "还没有人声区间。可以按字幕生成，再在时间线「人声」行里拖动调整；也可以手动添加。"
                  : "共 \(model.project.duckRanges.count) 个人声区间，在时间线「人声」行里拖动、拖两端调整，右键删除。")
@@ -76,17 +75,14 @@ struct DuckRangeInspector: View {
     let id: UUID
 
     var body: some View {
-        InspectorHeader(title: "人声区间", icon: "waveform.badge.minus")
-        if let r = model.project.duckRanges.first(where: { $0.id == id }) {
-            Text("\(r.start.displayString) – \(r.end.displayString)")
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.secondary)
+        // 标题 / 时间范围由 InspectorPanel 的固定头部统一显示
+        InspectorGroup("区间", key: "duck.range") {
+            Text("在这段时间里，开启了「有人声时调低」的音频会自动调低。")
+                .font(.system(size: 11)).foregroundStyle(Theme.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("删除这个区间", role: .destructive) { model.deleteSelection() }
+                .buttonStyle(PanelButtonStyle())
         }
-        Text("在这段时间里，开启了「有人声时调低」的音频会自动调低。")
-            .font(.system(size: 11)).foregroundStyle(Theme.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-        Button("删除这个区间", role: .destructive) { model.deleteSelection() }
-            .buttonStyle(PanelButtonStyle())
-        Divider().overlay(Theme.border)
         DuckingSection(model: model, clipID: nil)
     }
 }

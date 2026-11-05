@@ -60,18 +60,18 @@ private struct EditorStartScreen: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("最近工程")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.tertiary)
+                        .foregroundStyle(Theme.secondary)
                     ForEach(session.recent.prefix(6), id: \.self) { url in
                         Button {
                             session.openRecent(url)
                         } label: {
                             HStack {
                                 Image(systemName: "clock.arrow.circlepath")
-                                    .foregroundStyle(Theme.tertiary)
+                                    .foregroundStyle(Theme.secondary)
                                 Text(url.deletingPathExtension().lastPathComponent)
                                 Spacer()
                                 Text(url.lastPathComponent)
-                                    .foregroundStyle(Theme.tertiary)
+                                    .foregroundStyle(Theme.secondary)
                             }
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.text)

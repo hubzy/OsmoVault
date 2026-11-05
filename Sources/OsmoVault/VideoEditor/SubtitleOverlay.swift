@@ -63,7 +63,7 @@ struct SubtitleOverlay: View {
                         .simultaneousGesture(pinchGesture)
                         .help("双击修改这条字幕；拖动调整位置，拖右下角或双指捏合调整大小（对全部字幕生效）")
                     Circle().fill(Theme.accent)
-                        .overlay(Circle().stroke(.white, lineWidth: 1))
+                        .onContentHandleRing()
                         .frame(width: 10, height: 10)
                         .opacity(active ? 1 : 0)
                         .contentShape(Rectangle().inset(by: -6))

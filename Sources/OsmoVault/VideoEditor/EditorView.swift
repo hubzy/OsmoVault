@@ -55,7 +55,7 @@ struct EditorView: View {
         .overlay(alignment: .top) {
             if let notice = model.notice {
                 HStack(spacing: 10) {
-                    Image(systemName: "sun.max.fill").foregroundStyle(Theme.playhead)
+                    Image(systemName: "sun.max.fill").foregroundStyle(Theme.accent)
                     Text(notice).font(.system(size: 12))
                     Button { model.notice = nil } label: { Image(systemName: "xmark").font(.system(size: 10)) }
                         .buttonStyle(.plain)

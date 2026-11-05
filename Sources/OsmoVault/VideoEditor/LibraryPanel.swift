@@ -537,7 +537,7 @@ private struct PoolRulerStrip: View {
     /// 跨年份的分隔线：只是一条细线，不占月份刻度位
     private var yearDivider: some View {
         Rectangle()
-            .fill(Theme.tertiary.opacity(0.35))
+            .fill(Theme.gridLine)
             .frame(width: 1, height: 40)
             .padding(.horizontal, 3)
     }
@@ -633,7 +633,7 @@ private struct PoolRulerStrip: View {
             let progress = minOffset < 0 ? min(1, max(0, offset / minOffset)) : 0
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Theme.tertiary.opacity(0.5))
+                    .fill(Theme.scrollThumb)
                     .frame(width: barWidth, height: 2)
                     .offset(x: (visible - barWidth) * progress)
             }
@@ -747,11 +747,11 @@ private struct PoolCell: View {
                         if let thumb {
                             Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
                         } else {
-                            Rectangle().fill(Theme.raised)
+                            Rectangle().fill(Theme.placeholder)
                                 .overlay {
                                     Image(systemName: asset.kind == .photo ? "photo" : "film")
                                         .font(.system(size: 20))
-                                        .foregroundStyle(Theme.tertiary)
+                                        .foregroundStyle(Theme.emptyHint)
                                 }
                         }
                         // 悬停预览：视频 / 实况照片播动态部分，静音循环
@@ -775,7 +775,8 @@ private struct PoolCell: View {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(.white)
-                    .shadow(radius: 2)
+                    // 亮画面上白图标会糊掉，给一圈深色投影托底
+                    .shadow(color: .black.opacity(0.85), radius: 2)
                     .padding(5)
             }
         }
@@ -910,7 +911,9 @@ private struct TransitionTab: View {
                     ForEach(TransitionKind.allCases, id: \.self) { tile($0) }
                 }
             }
-            LabeledSlider(title: "时长", value: $duration, range: 0.2...2, format: { String(format: String(localized: "%.1f 秒"), $0) })
+            LabeledSlider(title: "时长", value: $duration, range: 0.2...2,
+                          format: { String(format: String(localized: "%.1f 秒"), $0) },
+                          resetValue: FCCore.Transition.defaultDuration.seconds)
             Button {
                 model.store.perform { $0.applyTransitionToAll(FCCore.Transition(kind: currentKind ?? .dissolve, duration: Time(seconds: duration))) }
             } label: {
@@ -1045,7 +1048,7 @@ private struct FilterTab: View {
             }
             if let clip {
                 LabeledSlider(title: "强度", value: model.clipBinding(clip.id, \.filter.intensity, default: 1), range: 0...1,
-                              onEditing: model.coalesce)
+                              onEditing: model.coalesce, resetValue: 1)
                 Button {
                     model.store.perform { $0.applyFilterToAll(clip.filter) }
                 } label: {

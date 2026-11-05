@@ -90,6 +90,7 @@ final class EditorModel {
 
     func close() {
         if recorder != nil { recorder?.stop(); recorder = nil }
+        settleLiveText()
         save()
         trashUnusedRecordings()
         exportTask?.cancel()
@@ -105,8 +106,10 @@ final class EditorModel {
 
     private func projectChanged() {
         // 任何工程编辑都退出源素材预览，预览区回到时间线画面
-        sourcePreview = nil
-        layout = TimelineLayout(project: store.project)
+        if sourcePreview != nil { sourcePreview = nil }
+        // 只改文字 / 字幕样式时主轨布局没变：别惊动整条时间线重算
+        let nextLayout = TimelineLayout(project: store.project)
+        if nextLayout != layout { layout = nextLayout }
         validateSelection()
         scheduleRebuild()
         scheduleAutosave()
@@ -347,6 +350,77 @@ final class EditorModel {
         store.endCoalescing()
     }
 
+    // MARK: 预览里拖动文字（即时反馈）
+
+    /// 正在拖动的文字。文字本来由 AVPlayer 通过 videoComposition 画进视频帧，改一次工程要等
+    /// 120ms 去抖 → 重建全部合成指令 → 精确 seek 解码一帧才刷新，拖动时明显滞后。
+    /// 拖动期间改由 SwiftUI 直接画同一张位图，视频层暂时不画它；松手后一次性提交并换回。
+    struct LiveText: Equatable {
+        var id: UUID
+        var style: SubtitleStyle
+        /// true：视频层跳过这条文字（拖动中）；false：视频层已恢复，副本只作过渡。
+        var suppressEngine: Bool
+    }
+    var liveText: LiveText?
+    @ObservationIgnored private var liveTextClearTask: Task<Void, Never>?
+    @ObservationIgnored private var liveTextWatchdog: Task<Void, Never>?
+
+    /// 开始拖动：视频层立刻撤掉这条文字，交给 SwiftUI 层。
+    func beginLiveText(_ clip: TextClip) {
+        liveTextClearTask?.cancel()
+        liveTextWatchdog?.cancel()
+        liveText = LiveText(id: clip.id, style: clip.style, suppressEngine: true)
+        scheduleRebuild(immediate: true)
+        // 手势万一被系统中断（onEnded 没来），别把预览永久留在「视频层不画这条文字」的状态
+        liveTextWatchdog = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard let self, let live = self.liveText, live.suppressEngine else { return }
+            self.endLiveText(id: live.id, x: live.style.horizontalPosition, y: live.style.verticalPosition)
+        }
+    }
+
+    /// 关闭工程前把还停留在预览态的位置落盘。
+    private func settleLiveText() {
+        liveTextClearTask?.cancel()
+        liveTextWatchdog?.cancel()
+        if let live = liveText, live.suppressEngine {
+            store.perform { $0.updateText(id: live.id) {
+                $0.style.horizontalPosition = live.style.horizontalPosition
+                $0.style.verticalPosition = live.style.verticalPosition
+            } }
+        }
+        liveText = nil
+    }
+
+    /// 拖动过程：只改预览状态，不写工程（否则每帧都会触发全量重算与重建调度）。
+    func updateLiveText(id: UUID, x: Double, y: Double) {
+        guard var live = liveText, live.id == id else { return }
+        live.style.horizontalPosition = x
+        live.style.verticalPosition = y
+        liveText = live
+    }
+
+    /// 松手：一次提交（天然就是一步撤销），视频层立即换回最终位置；
+    /// SwiftUI 副本多留一会儿，盖过重建 + seek 的那一帧，避免文字闪一下。
+    func endLiveText(id: UUID, x: Double, y: Double) {
+        guard var live = liveText, live.id == id else { return }
+        live.style.horizontalPosition = x
+        live.style.verticalPosition = y
+        store.perform { $0.updateText(id: id) {
+            $0.style.horizontalPosition = x
+            $0.style.verticalPosition = y
+        } }
+        live.suppressEngine = false
+        liveText = live
+        scheduleRebuild(immediate: true)
+        liveTextWatchdog?.cancel()
+        liveTextClearTask?.cancel()
+        liveTextClearTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            self?.liveText = nil
+        }
+    }
+
     // MARK: 字幕编辑
 
     /// 在右侧显示字幕样式：选中播放头处的字幕，没有则选第一条。
@@ -565,7 +639,12 @@ final class EditorModel {
     }
 
     private func renderProject(_ p: Project) -> Project {
-        comparingOriginal ? p.withoutGrading() : p
+        var p = comparingOriginal ? p.withoutGrading() : p
+        // 拖动中的文字改由 SwiftUI 层画，视频帧里先拿掉，避免一动就重建合成 + seek
+        if let live = liveText, live.suppressEngine {
+            p.texts.removeAll { $0.id == live.id }
+        }
+        return p
     }
 
     func copyGrade() {

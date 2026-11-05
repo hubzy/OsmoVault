@@ -88,16 +88,16 @@ struct TimelineView: View {
                     .frame(width: width, height: TL.ruler)
                     .gesture(DragGesture(minimumDistance: 0).onChanged { model.seek(to: time($0.location.x)) })
 
-                trackBackground(y: rows.textY, height: rows.textHeight, width: width)
-                trackBackground(y: rows.mainY, height: TL.main, width: width)
+                trackBackground(.text, y: rows.textY, height: rows.textHeight, width: width)
+                trackBackground(.main, y: rows.mainY, height: TL.main, width: width)
                 if rows.showsDuck {
-                    trackBackground(y: rows.duckY, height: TL.duck, width: width)
+                    trackBackground(.duck, y: rows.duckY, height: TL.duck, width: width)
                     duckRow(y: rows.duckY)
                 }
                 ForEach(0..<rows.audioLanes, id: \.self) { lane in
-                    trackBackground(y: rows.audioLaneY(lane), height: TL.music, width: width)
+                    trackBackground(.music, y: rows.audioLaneY(lane), height: TL.music, width: width)
                 }
-                trackBackground(y: rows.subtitleY, height: TL.subtitle, width: width)
+                trackBackground(.subtitle, y: rows.subtitleY, height: TL.subtitle, width: width)
 
                 textTrack(rows)
                 mainTrack(width: width, y: rows.mainY)
@@ -144,9 +144,13 @@ struct TimelineView: View {
         }
     }
 
-    private func trackBackground(y: CGFloat, height: CGFloat, width: CGFloat) -> some View {
+    /// 每条轨道按类型铺一层带色调的底 + 一圈细边。
+    /// 原先所有轨道共用 Color.white.opacity(0.025)：浅色下叠在 0.93 灰的窗口底上
+    /// 约等于没铺，深色下也只是极淡的一片，于是「所有轨道条都是一个颜色」。
+    private func trackBackground(_ kind: Theme.TrackKind, y: CGFloat, height: CGFloat, width: CGFloat) -> some View {
         Rectangle()
-            .fill(Color.white.opacity(0.025))
+            .fill(Theme.track(kind))
+            .overlay(Rectangle().stroke(Theme.trackEdge, lineWidth: 1))
             .frame(width: width, height: height)
             .offset(y: y)
             .allowsHitTesting(false)
@@ -167,9 +171,9 @@ struct TimelineView: View {
         if model.project.mainTrack.isEmpty {
             Text("把素材拖到这里，或在左侧素材库双击添加")
                 .font(.system(size: 12))
-                .foregroundStyle(Theme.tertiary)
+                .foregroundStyle(Theme.emptyHint)
                 .frame(width: min(width, 600), height: TL.main)
-                .background(RoundedRectangle(cornerRadius: Theme.corner).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(Theme.tertiary))
+                .background(RoundedRectangle(cornerRadius: Theme.corner).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(Theme.emptyHint))
                 .offset(x: TL.leading, y: mainY)
                 .allowsHitTesting(false)
         }
@@ -402,9 +406,14 @@ private struct ZoomEventCatcher: NSViewRepresentable {
 private struct RulerView: View {
     let pps: CGFloat
     let width: CGFloat
+    /// Canvas 里不用动态 NSColor：离屏渲染不保证拿到当前外观，按 colorScheme 显式取色
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        Canvas { ctx, size in
+        let dark = colorScheme == .dark
+        let tick = CanvasPalette.tick(dark)
+        let labelColor = CanvasPalette.label(dark)
+        return Canvas { ctx, size in
             let candidates: [Double] = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
             let major = candidates.first { $0 * Double(pps) >= 80 } ?? 1800
             let minor = major / 5
@@ -417,14 +426,16 @@ private struct RulerView: View {
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: size.height - (isMajor ? 10 : 5)))
                 path.addLine(to: CGPoint(x: x, y: size.height))
-                ctx.stroke(path, with: .color(Theme.tertiary), lineWidth: 1)
+                ctx.stroke(path, with: .color(tick), lineWidth: 1)
                 if isMajor {
-                    ctx.draw(Text(label(t, major: major)).font(.system(size: 9).monospacedDigit()).foregroundColor(Theme.secondary),
+                    ctx.draw(Text(label(t, major: major)).font(.system(size: 9).monospacedDigit()).foregroundColor(labelColor),
                              at: CGPoint(x: x + 3, y: 4), anchor: .topLeading)
                 }
                 i += 1
             }
         }
+        .background(Theme.ruler)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
     private func label(_ t: Double, major: Double) -> String {
@@ -463,9 +474,10 @@ private struct TrimHandle: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 2)
-            .fill(Color.white)
+            .fill(Theme.trimHandle)
             .frame(width: TL.handle)
-            .overlay(Rectangle().fill(Color.black.opacity(0.4)).frame(width: 2, height: 14))
+            .overlay(RoundedRectangle(cornerRadius: 2).stroke(Theme.trimHandleBorder, lineWidth: 1))
+            .overlay(Rectangle().fill(Theme.trimGrip).frame(width: 2, height: 14))
             .contentShape(Rectangle())
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
@@ -515,7 +527,7 @@ private struct MainClipView: View {
         .frame(width: width, height: TL.main)
         .background(Theme.videoClip)
         .clipShape(RoundedRectangle(cornerRadius: Theme.corner))
-        .overlay(RoundedRectangle(cornerRadius: Theme.corner).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .clipSelectionBorder(selected, radius: Theme.corner)
         .overlay(alignment: .leading) { if selected { trimHandle(leading: true) } }
         .overlay(alignment: .trailing) { if selected { trimHandle(leading: false) } }
         .offset(x: dragX)
@@ -638,7 +650,8 @@ private struct TransitionMarker: View {
                 .frame(width: 20, height: 20)
                 .background(RoundedRectangle(cornerRadius: 4).fill(placement.transitionIn == nil ? Color.black.opacity(0.6) : Theme.accent))
                 .foregroundStyle(Color.white)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : .clear, lineWidth: 2))
+                .overlay { if selected { RoundedRectangle(cornerRadius: 4).stroke(Theme.selectionHalo, lineWidth: 4) } }
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.selection : .clear, lineWidth: 2))
                 .rotationEffect(.degrees(placement.transitionIn == nil ? 45 : 0))
         }
         .buttonStyle(.plain)
@@ -661,8 +674,11 @@ private struct MusicClipView: View {
 
     private var selected: Bool { model.selection == .music(clip.id) }
     private var width: CGFloat { max(4, CGFloat(clip.duration.seconds) * pps) }
+    /// 波形 / 音量曲线画在 Canvas 里，颜色按外观显式取固定值
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let dark = colorScheme == .dark
         ZStack(alignment: .topLeading) {
             Canvas { ctx, size in
                 guard !peaks.isEmpty else { return }
@@ -679,7 +695,7 @@ private struct MusicClipView: View {
                     path.addRect(CGRect(x: x, y: size.height - 4 - h, width: 1.2, height: h))
                     i += step
                 }
-                ctx.fill(path, with: .color(Color.white.opacity(0.45)))
+                ctx.fill(path, with: .color(CanvasPalette.waveform(dark)))
             }
             // 音量曲线：淡入淡出、人声避让、静音一目了然（满高为 100%）
             Canvas { ctx, size in
@@ -692,7 +708,7 @@ private struct MusicClipView: View {
                     let y = bottom - CGFloat(min(1, p.gain)) * (bottom - top)
                     if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
                 }
-                ctx.stroke(path, with: .color(Theme.playhead.opacity(0.85)), lineWidth: 1.2)
+                ctx.stroke(path, with: .color(CanvasPalette.volume(dark)), lineWidth: 1.2)
             }
             .allowsHitTesting(false)
             HStack(spacing: 4) {
@@ -707,7 +723,7 @@ private struct MusicClipView: View {
         .frame(width: width, height: TL.music)
         .background(Theme.musicClip)
         .clipShape(RoundedRectangle(cornerRadius: Theme.corner))
-        .overlay(RoundedRectangle(cornerRadius: Theme.corner).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .clipSelectionBorder(selected, radius: Theme.corner)
         .overlay(alignment: .leading) { if selected { handle(leading: true) } }
         .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
         .zIndex(selected ? 5 : 0)
@@ -790,7 +806,7 @@ private struct SubtitleClipView: View {
             .foregroundStyle(.white)
             .background(Theme.subtitleClip)
             .clipShape(RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+            .clipSelectionBorder(selected, radius: 4)
             .overlay(alignment: .leading) { if selected { handle(leading: true) } }
             .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
             .zIndex(selected ? 5 : 0)
@@ -858,7 +874,7 @@ private struct TextClipView: View {
         .foregroundStyle(.white)
         .background(Theme.textClip)
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+        .clipSelectionBorder(selected, radius: 4)
         .overlay(alignment: .leading) { if selected { handle(leading: true) } }
         .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
         .zIndex(selected ? 5 : 0)
@@ -928,7 +944,7 @@ private struct DuckRangeView: View {
             .foregroundStyle(.white)
             .background(Theme.duckRange)
             .clipShape(RoundedRectangle(cornerRadius: 3))
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(selected ? Color.white : Theme.border, lineWidth: selected ? 2 : 1))
+            .clipSelectionBorder(selected, radius: 3)
             .overlay(alignment: .leading) { if selected { handle(leading: true) } }
             .overlay(alignment: .trailing) { if selected { handle(leading: false) } }
             .zIndex(selected ? 5 : 0)

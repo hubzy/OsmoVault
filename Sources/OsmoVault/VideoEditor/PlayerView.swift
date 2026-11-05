@@ -32,7 +32,7 @@ struct PlayerPanel: View {
                 Theme.window
                 if model.project.mainTrack.isEmpty {
                     VStack(spacing: 10) {
-                        Image(systemName: "film.stack").font(.system(size: 36)).foregroundStyle(Theme.tertiary)
+                        Image(systemName: "film.stack").font(.system(size: 36)).foregroundStyle(Theme.emptyHint)
                         Text("把视频或照片拖进来开始剪辑").foregroundStyle(Theme.secondary)
                         Button("导入素材…") { model.importPanel(addToTimeline: true) }
                             .buttonStyle(PanelButtonStyle(prominent: true))

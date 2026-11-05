@@ -182,27 +182,27 @@ struct SubtitleStyleEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // 用 Group 而非 VStack：外层 InspectorGroup 已经有统一间距，这里不再叠一层
+        Group {
             Picker("字体", selection: style(\.fontName)) {
                 ForEach(fonts, id: \.0) { Text($0.1).tag($0.0) }
             }
             .font(.system(size: 12))
-            Text("也可以在预览画面里直接拖动字幕调整位置，拖右下角调整大小。")
+            Text("也可以在预览画面里直接拖动字幕调整位置，拖右下角调整大小。数值前的圆点可复位，也可以直接键入数值。")
                 .font(.system(size: 11)).foregroundStyle(Theme.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
             LabeledSlider(title: "字号", value: style(\.fontSize), range: SubtitleStyle.fontSizeRange,
-                          format: { "\(Int($0 * 1000))" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 1000))" }, onEditing: model.coalesce,
+                          resetValue: SubtitleStyle().fontSize)
             LabeledSlider(title: "上下位置", value: style(\.verticalPosition), range: 0...1,
-                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
-            HStack(alignment: .bottom, spacing: 8) {
-                LabeledSlider(title: "左右位置", value: style(\.horizontalPosition), range: 0...1,
-                              format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce)
-                Button("居中") { model.store.perform { $0.subtitleStyle.horizontalPosition = 0.5 } }
-                    .buttonStyle(PanelButtonStyle())
-                    .disabled(model.project.subtitleStyle.horizontalPosition == 0.5)
-            }
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce,
+                          resetValue: SubtitleStyle().verticalPosition)
+            LabeledSlider(title: "左右位置", value: style(\.horizontalPosition), range: 0...1,
+                          format: { "\(Int($0 * 100))%" }, onEditing: model.coalesce,
+                          resetValue: SubtitleStyle().horizontalPosition)
             LabeledSlider(title: "描边粗细", value: style(\.strokeWidth), range: 0...0.3,
-                          format: { "\(Int($0 * 100))" }, onEditing: model.coalesce)
+                          format: { "\(Int($0 * 100))" }, onEditing: model.coalesce,
+                          resetValue: SubtitleStyle().strokeWidth)
             HStack(spacing: 14) {
                 ColorPicker("文字", selection: colorBinding(style(\.textColor)), supportsOpacity: false)
                 ColorPicker("描边", selection: colorBinding(style(\.strokeColor)), supportsOpacity: false)

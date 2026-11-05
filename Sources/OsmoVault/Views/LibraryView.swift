@@ -21,6 +21,12 @@ struct LibraryView: View {
     /// 多选后的批量操作：普通页是「移入回收站」，由调用方决定具体动作
     var onDeleteSelected: (([Asset]) -> Void)?
     var emptyHint: String?
+    /// 批量动作真正落地后的复位信号（父视图每完成一次 +1）。
+    /// 打开补定位面板只是「开始」，用户还可能取消；所以只有应用成功才该退出多选。
+    var selectionResetToken: Int = 0
+    /// 多选右键的批量评分 / 批量收藏：勾选集由本视图组装，父视图只负责写库
+    var onRateSelected: (([Asset], Int) -> Void)? = nil
+    var onSetFavoriteSelected: (([Asset], Bool) -> Void)? = nil
 
     /// 「补定位」页的多选状态。素材补完后会从本页消失，勾选集合跟着清理
     @State private var selectionMode = false
@@ -28,14 +34,9 @@ struct LibraryView: View {
     /// 批量移入回收站的二次确认（单条移入是可恢复操作，不确认）
     @State private var confirmMoveToTrash = false
 
-    /// 当前勾选的素材（工具栏批量操作共用）
+    /// 当前勾选的素材（右键批量操作共用）
     private var pickedAssets: [Asset] {
         assets.filter { checkedIDs.contains($0.id ?? -1) }
-    }
-
-    /// 勾选集全部已有定位时，批量按钮显示「修改定位」而不是「补定位」
-    private var pickedAllLocated: Bool {
-        !pickedAssets.isEmpty && pickedAssets.allSatisfy { $0.latitude != nil }
     }
 
     @State private var sections: [TimelineMonth] = []
@@ -58,12 +59,10 @@ struct LibraryView: View {
         }
         .onChange(of: cacheKey, initial: true) { _, _ in recompute() }
         // 切到别的集合时清掉多选，避免勾选状态被 SwiftUI 复用带到其他页面
-        .onChange(of: title) { _, _ in
-            selectionMode = false
-            checkedIDs.removeAll()
-            // 换集合时把确认状态一并收掉，避免残留一个指向旧集合的弹窗
-            confirmMoveToTrash = false
-        }
+        .onChange(of: title) { _, _ in exitSelectionMode() }
+        // 批量补/改定位、批量清除定位、批量移入回收站成功后自动退出多选：
+        // 动作已经完成，勾选集不再有意义，不该让用户再手动点一次「完成」
+        .onChange(of: selectionResetToken) { _, _ in exitSelectionMode() }
         .confirmationDialog("移入回收站？", isPresented: $confirmMoveToTrash) {
             // 中性确认：moveToTrash 只置 isDeleted 标记，行与元数据全留，不是不可逆操作
             Button("移入回收站 \(checkedIDs.count) 个") {
@@ -85,6 +84,9 @@ struct LibraryView: View {
         // 补完定位的素材已经从这一页消失，勾选集合同步收敛，不会越攒越多
         let valid = Set(assets.compactMap(\.id))
         checkedIDs.formIntersection(valid)
+        // 「无定位」页全部补完后 assets 为空，直接复位，
+        // 别残留一个已经没有素材可操作的多选状态
+        if assets.isEmpty { exitSelectionMode() }
     }
 
     // MARK: - 顶部：标题 + 总量统计 + 视图切换
@@ -93,88 +95,51 @@ struct LibraryView: View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.title2).bold()
-                Text(summaryText)
+                // 顶部只留纯文字反馈，多选入口与批量动作全部搬进右键菜单
+                Text(headerSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help(summaryText)
+                    .help("右键卡片可「选中」开始多选；已选素材可在右键菜单里批量补定位、收藏、评分或移到回收站")
             }
             Spacer(minLength: 0)
-
-            // 多选入口每个页面都有：先「选择」进入多选，勾完再批量处理。
-            // 批量动作因页而异——补定位页是「补定位」，普通页是「移入回收站」
-            if !assets.isEmpty {
-                selectionToolbar
-            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
     }
 
+    /// 多选时在原有统计后追加「已选 N 个」，不放任何按钮
+    private var headerSummary: String {
+        selectionMode ? "\(summaryText) · 已选 \(checkedIDs.count) 个" : summaryText
+    }
+
+    /// 退出多选：模式、勾选、残留的确认弹窗一起收掉。
+    /// 右键「退出多选」、切换集合、批量动作完成、集合清空全走这一条路径
+    private func exitSelectionMode() {
+        selectionMode = false
+        checkedIDs.removeAll()
+        confirmMoveToTrash = false
+    }
+
+    /// 右键「选中 / 取消选中」与多选模式下点卡片共用：
+    /// 第一次勾选自动进入多选，取消到空自动退出——顶部不再需要「选择 / 完成」按钮
     private func toggleCheck(_ id: Int64) {
         if checkedIDs.contains(id) {
             checkedIDs.remove(id)
+            if checkedIDs.isEmpty { exitSelectionMode() }
         } else {
             checkedIDs.insert(id)
+            selectionMode = true
         }
     }
 
-    @ViewBuilder
-    private var selectionToolbar: some View {
-        Button(selectionMode ? "完成" : "选择") {
-            selectionMode.toggle()
-            if !selectionMode { checkedIDs.removeAll() }
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .help(selectionMode ? "退出多选" : "进入多选，勾选要处理的素材")
-
-        if selectionMode {
-            Button(checkedIDs.count == assets.count ? "取消全选" : "全选") {
-                if checkedIDs.count == assets.count {
-                    checkedIDs.removeAll()
-                } else {
-                    checkedIDs = Set(assets.compactMap(\.id))
-                }
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-
-            Text("已选 \(checkedIDs.count) / \(assets.count)")
-                .font(.caption)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-
-            // 主操作：所有页面都能批量补/改定位（勾选集全有定位显示「修改定位」），
-            // 「移入回收站」各页也有
-            if let onAssign = onAssignLocation {
-                Button {
-                    let picked = pickedAssets
-                    guard !picked.isEmpty else { return }
-                    onAssign(picked)
-                } label: {
-                    Label(pickedAllLocated ? "修改定位 已选 \(checkedIDs.count)"
-                          : "补定位 已选 \(checkedIDs.count)",
-                          systemImage: "mappin.circle")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(checkedIDs.isEmpty)
-                .help("给勾中的 \(checkedIDs.count) 个素材标同一个位置")
-            }
-            if onDeleteSelected != nil {
-                // L2 中性 + 确认：批量影响面大所以确认，但 moveToTrash 可恢复，不涂红不加 role。
-                // 执行后仍走原来的批量 moveToTrash 逻辑（见 confirmationDialog）
-                Button {
-                    confirmMoveToTrash = true
-                } label: {
-                    Label("移入回收站 已选 \(checkedIDs.count)", systemImage: "trash")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(checkedIDs.isEmpty)
-                .help("把勾中的 \(checkedIDs.count) 个素材移入回收站")
-            }
+    /// 右键菜单里的「全选 / 取消全选」，按整个当前集合算，不是某一天 / 某一月的分组
+    private func toggleSelectAll() {
+        if !assets.isEmpty && checkedIDs.count >= assets.count {
+            checkedIDs.removeAll()
+        } else {
+            checkedIDs = Set(assets.compactMap(\.id))
+            selectionMode = true
         }
     }
 
@@ -250,16 +215,29 @@ struct LibraryView: View {
                              onToggleCheck: toggleCheck,
                              onLocate: locateTarget,
                              // 有批量通道的页面都允许右键批量项（现在所有页面都有）
-                             canBatchLocate: onAssignLocation != nil)
+                             canBatchLocate: onAssignLocation != nil,
+                             // 右键已勾选卡片 → 弹批量确认框，删的是整个勾选集
+                             onDeleteChecked: onDeleteSelected == nil
+                               ? nil : { self.confirmMoveToTrash = true },
+                             onRateChecked: onRateSelected == nil ? nil : { rating in
+                                 self.onRateSelected?(self.pickedAssets, rating)
+                             },
+                             onSetFavoriteChecked: onSetFavoriteSelected == nil ? nil : { favorite in
+                                 self.onSetFavoriteSelected?(self.pickedAssets, favorite)
+                             },
+                             checkedAssets: pickedAssets,
+                             onExitSelection: { self.exitSelectionMode() },
+                             onToggleSelectAll: { self.toggleSelectAll() },
+                             totalCount: assets.count)
         }
     }
 
     /// 右键「补定位」的统一入口：
-    /// 多选且勾了素材 → 整批（文字是「已选 N 条」，行为必须对应）；
-    /// 其余场景 → 右键的那一条，有定位就能改。
+    /// 右键的是已勾选卡片 → 整批（菜单文字是「已选 N 条」，行为必须对应）；
+    /// 右键未勾选的卡片 / 没进多选 → 只改这一条，这样菜单收成一条也不会丢单条操作。
     /// 单条走 .single 才能在面板里回显已有位置，批量才是 .batch
     private func locateTarget(id: Int64) {
-        if selectionMode, !checkedIDs.isEmpty {
+        if selectionMode, checkedIDs.contains(id) {
             let picked = pickedAssets
             if !picked.isEmpty {
                 onAssignLocation?(picked)
@@ -377,6 +355,16 @@ private struct TimelineScroller: View {
     var onLocate: ((Int64) -> Void)?
     /// 补定位页才显示「补定位 已选 N 条」批量菜单项
     var canBatchLocate = false
+    /// 右键已勾选卡片的批量「移到回收站」：透传给卡片，由 LibraryView 统一确认执行
+    var onDeleteChecked: (() -> Void)? = nil
+    /// 批量评分 / 批量收藏：勾选集由 LibraryView 组装，这里只往下透传目标值
+    var onRateChecked: ((Int) -> Void)? = nil
+    var onSetFavoriteChecked: ((Bool) -> Void)? = nil
+    var checkedAssets: [Asset] = []
+    /// 右键菜单里的多选控制（顶部工具栏已移除）
+    var onExitSelection: (() -> Void)? = nil
+    var onToggleSelectAll: (() -> Void)? = nil
+    var totalCount: Int = 0
 
     /// 与列表滚动位置双向绑定的原始值，滚动过程中可能短暂回写 nil
     @State private var scrolledMonthID: String?
@@ -396,6 +384,29 @@ private struct TimelineScroller: View {
     private let batchSize = 3
 
     private var hasMoreMonths: Bool { monthLimit < months.count }
+
+    /// 按月分组与「无拍摄时间」共用同一套回调，避免两处各写一遍长参数列表
+    private func grid(_ items: [Asset]) -> some View {
+        AssetGridView(assets: items,
+                      selectedAssetID: $selectedAssetID,
+                      onRate: onRate,
+                      onDelete: onDelete,
+                      onToggleFavorite: onToggleFavorite,
+                      onVisible: onVisible,
+                      selectionMode: selectionMode,
+                      checkedIDs: checkedIDs,
+                      onToggleCheck: onToggleCheck,
+                      onLocate: onLocate,
+                      onDeleteChecked: onDeleteChecked,
+                      canBatchLocate: canBatchLocate,
+                      embedded: true,
+                      onRateChecked: onRateChecked,
+                      onSetFavoriteChecked: onSetFavoriteChecked,
+                      checkedAssets: checkedAssets,
+                      onExitSelection: onExitSelection,
+                      onToggleSelectAll: onToggleSelectAll,
+                      totalCount: totalCount)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -421,16 +432,7 @@ private struct TimelineScroller: View {
                                                 .font(.caption2).foregroundStyle(.secondary)
                                             Spacer()
                                         }
-                                        AssetGridView(assets: day.items, selectedAssetID: $selectedAssetID,
-                                                      onRate: onRate, onDelete: onDelete,
-                                                      onToggleFavorite: onToggleFavorite,
-                                                      onVisible: onVisible,
-                                                      selectionMode: selectionMode,
-                                                      checkedIDs: checkedIDs,
-                                                      onToggleCheck: onToggleCheck,
-                                                      onLocate: onLocate,
-                                                      canBatchLocate: canBatchLocate,
-                                                      embedded: true)
+                                        grid(day.items)
                                     }
                                 }
                             } header: {
@@ -455,16 +457,7 @@ private struct TimelineScroller: View {
 
                         if !undated.isEmpty && !hasMoreMonths {
                             Section {
-                                AssetGridView(assets: undated, selectedAssetID: $selectedAssetID,
-                                              onRate: onRate, onDelete: onDelete,
-                                              onToggleFavorite: onToggleFavorite,
-                                              onVisible: onVisible,
-                                              selectionMode: selectionMode,
-                                              checkedIDs: checkedIDs,
-                                              onToggleCheck: onToggleCheck,
-                                              onLocate: onLocate,
-                                              canBatchLocate: canBatchLocate,
-                                              embedded: true)
+                                grid(undated)
                             } header: {
                                 HStack(spacing: 8) {
                                     Text("未知拍摄时间").font(.title3).bold()

@@ -137,6 +137,16 @@ final class AppDatabase {
         }
     }
 
+    /// 批量评分：整批一个事务，和 setLocation(ids:) 一样避免几百次 fsync
+    func updateRating(ids: [Int64], rating: Int) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            for id in ids {
+                try db.execute(sql: "UPDATE asset SET rating = ? WHERE id = ?", arguments: [rating, id])
+            }
+        }
+    }
+
     func updateColorLabel(id: Int64, label: Int) throws {
         try dbWriter.write { db in
             try db.execute(sql: "UPDATE asset SET colorLabel = ? WHERE id = ?", arguments: [label, id])
@@ -146,6 +156,16 @@ final class AppDatabase {
     func setFavorite(id: Int64, favorite: Bool) throws {
         try dbWriter.write { db in
             try db.execute(sql: "UPDATE asset SET isFavorite = ? WHERE id = ?", arguments: [favorite, id])
+        }
+    }
+
+    /// 批量收藏 / 取消收藏：统一设成一个值，不对混合状态的勾选集逐条 toggle
+    func setFavorite(ids: [Int64], favorite: Bool) throws {
+        guard !ids.isEmpty else { return }
+        try dbWriter.write { db in
+            for id in ids {
+                try db.execute(sql: "UPDATE asset SET isFavorite = ? WHERE id = ?", arguments: [favorite, id])
+            }
         }
     }
 

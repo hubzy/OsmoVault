@@ -15,12 +15,26 @@ struct AssetGridView: View {
     var onToggleCheck: ((Int64) -> Void)?
     /// 右键「补定位」。回调传当前卡片 id；多选模式下由调用方决定作用于勾选集还是单条
     var onLocate: ((Int64) -> Void)?
+    /// 多选右键已勾选卡片时的批量「移到回收站」：由外层统一弹二次确认并执行。
+    /// 勾选集归 LibraryView 管，这里只发一个「请求批量删除」的信号
+    var onDeleteChecked: (() -> Void)? = nil
     /// 只有「补定位」页置 true：右键菜单里才出现「补定位 已选 N 条」批量项。
     /// 其他页面（图库/来源/地点…）右键只对症当前这条，避免点了"批量"实际只改一条
     var canBatchLocate = false
     var emptyHint: String?
     /// 嵌入别的滚动容器（比如时间轴）时置 true：不再套自己的 ScrollView，避免双层滚动
     var embedded = false
+    /// 多选右键已勾选卡片时的批量评分 / 批量收藏：勾选集由 LibraryView 组装，这里只传目标值
+    var onRateChecked: ((Int) -> Void)? = nil
+    var onSetFavoriteChecked: ((Bool) -> Void)? = nil
+    /// 整个勾选集（不是当前网格这一天/这一月的分组）：
+    /// 批量项的「已选 N」和「全部已收藏 / 全部已定位」判断都得以它为准
+    var checkedAssets: [Asset] = []
+    /// 右键菜单里的多选控制：退出多选 / 全选。顶部不再放「选择 / 完成」按钮
+    var onExitSelection: (() -> Void)? = nil
+    var onToggleSelectAll: (() -> Void)? = nil
+    /// 整个页面的素材数（不是本分组），用来判断「全选 / 取消全选」
+    var totalCount: Int = 0
     // 竖屏素材用更窄的最小宽度，让同屏能排下更多卡片
     private var columns: [GridItem] { [GridItem(.adaptive(minimum: 200), spacing: 14)] }
 
@@ -61,41 +75,74 @@ struct AssetGridView: View {
                 // LazyVGrid 只实例化可视区的 cell，所以这里天然就是"滚到才生成"
                 .onAppear { if let id = asset.id { onVisible?(id) } }
                 .contextMenu {
+                    // 多选入口整个搬进右键：第一次「选中」自动进入多选，
+                    // 顶部不再需要「选择 / 完成 / 批量」按钮。
+                    // 右键已勾选卡片 = 对整个勾选集操作（补定位 / 收藏 / 评分 / 删除统一走这条）；
+                    // 右键未勾选的卡片或没进多选 = 只作用这一条
+                    let batchForChecked = selectionMode && checkedIDs.contains(id) && !checkedAssets.isEmpty
+                    let count = checkedAssets.count
+
+                    Button(checkedIDs.contains(id) ? "取消选中" : "多选") { onToggleCheck?(id) }
                     if selectionMode {
-                        Button(checkedIDs.contains(id) ? "取消选中" : "选中") { onToggleCheck?(id) }
+                        Divider()
+                        Button(totalCount > 0 && checkedIDs.count >= totalCount ? "取消全选" : "全选") {
+                            onToggleSelectAll?()
+                        }
+                        Button("退出多选") { onExitSelection?() }
+                        Divider()
                     }
                     if onLocate != nil {
-                        // 多选勾了 → 给整批；其余场景对症右键的这一条。
+                        // 只给一条补定位入口，避免菜单里同时冒出两个「补定位」。
                         // 有定位显示「修改定位」，没有显示「补定位」（定位不准时从这里改）
-                        if selectionMode && canBatchLocate && !checkedIDs.isEmpty {
-                            let allLocated = assets
-                                .filter { checkedIDs.contains($0.id ?? 0) }
-                                .allSatisfy { $0.latitude != nil }
+                        if batchForChecked && canBatchLocate {
+                            let allLocated = checkedAssets.allSatisfy { $0.latitude != nil }
                             Button {
                                 onLocate?(id)
                             } label: {
-                                Label(allLocated ? "修改定位 · 已选 \(checkedIDs.count) 条"
-                                      : "补定位 · 已选 \(checkedIDs.count) 条",
+                                Label(allLocated ? "修改定位 · 已选 \(count) 条"
+                                      : "补定位 · 已选 \(count) 条",
+                                      systemImage: "mappin.circle")
+                            }
+                        } else {
+                            Button {
+                                onLocate?(id)
+                            } label: {
+                                Label(asset.latitude == nil ? "补定位…" : "修改定位…",
                                       systemImage: "mappin.circle")
                             }
                         }
-                        Button {
-                            onLocate?(id)
-                        } label: {
-                            Label(asset.latitude == nil ? "补定位…" : "修改定位…",
-                                  systemImage: "mappin.circle")
-                        }
                     }
-                    Button(asset.isFavorite ? "取消收藏" : "收藏") {
-                        onToggleFavorite?(id)
+                    if batchForChecked, let onSetFavoriteChecked {
+                        // 勾选集里可能有的已收藏有的没收藏：统一设成一个值，
+                        // 全已收藏才给「取消收藏」，否则给「收藏」
+                        let allFavorite = checkedAssets.allSatisfy { $0.isFavorite }
+                        Button(allFavorite ? "取消收藏 已选 \(count)" : "收藏 已选 \(count)") {
+                            onSetFavoriteChecked(!allFavorite)
+                        }
+                    } else {
+                        Button(asset.isFavorite ? "取消收藏" : "收藏") {
+                            onToggleFavorite?(id)
+                        }
                     }
                     // 评分键盘等价路径：网格里的星标是 onTapGesture，不可聚焦
-                    Menu("评分") {
-                        ForEach(0...5, id: \.self) { r in
-                            Button(r == 0 ? "清除评分" : "\(r) 星") { onRate(id, r) }
+                    if batchForChecked, let onRateChecked {
+                        Menu("评分 已选 \(count)") {
+                            ForEach(0...5, id: \.self) { r in
+                                Button(r == 0 ? "清除评分" : "\(r) 星") { onRateChecked(r) }
+                            }
+                        }
+                    } else {
+                        Menu("评分") {
+                            ForEach(0...5, id: \.self) { r in
+                                Button(r == 0 ? "清除评分" : "\(r) 星") { onRate(id, r) }
+                            }
                         }
                     }
-                    Button("移到回收站") { onDelete?(id) }
+                    if batchForChecked, let onDeleteChecked {
+                        Button("移到回收站 已选 \(count)") { onDeleteChecked() }
+                    } else {
+                        Button("移到回收站") { onDelete?(id) }
+                    }
                 }
         }
     }

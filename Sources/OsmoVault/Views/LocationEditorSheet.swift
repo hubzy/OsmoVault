@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import MapKit
 import CoreLocation
 
@@ -67,9 +68,23 @@ struct LocationEditorSheet: View {
     @State private var hint: String?
     /// 只有批量清除才需要二次确认
     @State private var confirmClear = false
+    /// 地图图层：0 标准 / 1 卫星 / 2 混合。找山川、建筑、楼栋时卫星图更直观
+    @State private var mapStyleIndex = 0
 
     /// 没有任何已知坐标时的落点：先给一个能看到全国的范围
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 34.5, longitude: 105.0)
+
+    /// 弹窗和地图都按屏幕大小走：小屏不会被窗口裁掉，大屏给足选点面积。
+    /// 原来固定 520×240 的地图实在太小，点选和辨别位置都很费劲
+    private static var sheetWidth: CGFloat {
+        let w = NSScreen.main?.visibleFrame.width ?? 1440
+        return min(max(w * 0.6, 780), 1000)
+    }
+
+    private static var mapHeight: CGFloat {
+        let h = NSScreen.main?.visibleFrame.height ?? 900
+        return min(max(h * 0.45, 340), 460)
+    }
 
     init(target: LocationEditTarget,
          onApply: @escaping (CLLocationCoordinate2D, String?) -> Void,
@@ -95,7 +110,7 @@ struct LocationEditorSheet: View {
             footer
         }
         .padding(16)
-        .frame(width: 520)
+        .frame(width: Self.sheetWidth)
         .fixedSize(horizontal: false, vertical: true)
         .confirmationDialog("清除定位？", isPresented: $confirmClear) {
             Button("清除 \(target.assets.count) 个素材的定位", role: .destructive) {
@@ -120,33 +135,95 @@ struct LocationEditorSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text("在地图上点一下选位置，也可以直接填经纬度或搜地名")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
     }
 
-    /// 地图选点。用 MapReader 把点击位置换算成经纬度
+    /// 地图选点。用 MapReader 把点击位置换算成经纬度。
+    /// 放大的地图上常驻缩放 / 图层 / 回到落点控件，选位置不用反复拖着找
     private var mapPicker: some View {
         MapReader { proxy in
-            Map(position: $camera) {
-                if let c = coordinate {
-                    Marker("选中的位置", coordinate: c)
-                        .tint(.red)
-                }
-            }
-            .mapStyle(.standard)
-            .frame(height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-            )
-            .onTapGesture { point in
-                guard let c = proxy.convert(point, from: .local) else { return }
-                setCoordinate(c, moveCamera: false)
+            mapCanvas(proxy: proxy)
+        }
+    }
+
+    @ViewBuilder
+    private func mapCanvas(proxy: MapProxy) -> some View {
+        let base = Map(position: $camera) {
+            if let c = coordinate {
+                Marker("选中的位置", coordinate: c)
+                    .tint(.red)
             }
         }
+        Group {
+            switch mapStyleIndex {
+            case 1: base.mapStyle(.imagery)
+            case 2: base.mapStyle(.hybrid)
+            default: base.mapStyle(.standard)
+            }
+        }
+        .frame(height: Self.mapHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+        .overlay(alignment: .topTrailing) { mapControls.padding(10) }
+        .overlay(alignment: .bottomLeading) { coordinateBadge.padding(10) }
+        .onTapGesture { point in
+            guard let c = proxy.convert(point, from: .local) else { return }
+            setCoordinate(c, moveCamera: false)
+        }
+    }
+
+    /// 地图右上角：缩放、回到落点、切换图层
+    private var mapControls: some View {
+        VStack(spacing: 6) {
+            controlButton("plus.magnifyingglass", "放大地图") { zoom(by: 0.5) }
+            controlButton("minus.magnifyingglass", "缩小地图") { zoom(by: 2) }
+            controlButton("scope", "回到选中的位置") { zoomToCoordinate() }
+                .disabled(coordinate == nil)
+            Menu {
+                Button("标准地图") { mapStyleIndex = 0 }
+                Button("卫星影像") { mapStyleIndex = 1 }
+                Button("混合") { mapStyleIndex = 2 }
+            } label: {
+                Image(systemName: "square.2.layers.3d")
+                    .frame(width: 20, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("切换地图图层")
+        }
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func controlButton(_ icon: String, _ tip: String,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).frame(width: 20, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(tip)
+    }
+
+    /// 左下角直接显示当前落点，不用抬头核对输入框
+    @ViewBuilder
+    private var coordinateBadge: some View {
+        HStack(spacing: 6) {
+            if let c = coordinate {
+                Image(systemName: "mappin.circle.fill").foregroundStyle(.red)
+                Text(String(format: "%.5f, %.5f", c.latitude, c.longitude))
+                    .monospacedDigit()
+            } else {
+                Text("点击地图选点 · 滚轮 / 双指缩放")
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
     }
 
     private var coordinateFields: some View {
@@ -253,8 +330,9 @@ struct LocationEditorSheet: View {
         lonText = String(format: "%.6f", c.longitude)
         hint = nil
         if moveCamera {
+            // 搜地名命中时给一个城市尺度的视野，别一上来就贴到 8km 里
             camera = .region(MKCoordinateRegion(center: c,
-                                                span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)))
+                                                span: MKCoordinateSpan(latitudeDelta: 0.2, longitudeDelta: 0.2)))
         }
     }
 
@@ -283,6 +361,18 @@ struct LocationEditorSheet: View {
         guard let c = coordinate else { return }
         camera = .region(MKCoordinateRegion(center: c,
                                             span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)))
+    }
+
+    /// 以当前视野中心按比例缩放。用 position binding 里的 region，
+    /// 用户滚轮 / 拖拽之后按钮仍接着当前视野继续，不会突然跳回初始范围
+    private func zoom(by factor: Double) {
+        let current = camera.region ?? MKCoordinateRegion(
+            center: coordinate ?? Self.fallbackCenter,
+            span: MKCoordinateSpan(latitudeDelta: 45, longitudeDelta: 45))
+        let span = MKCoordinateSpan(
+            latitudeDelta: min(max(current.span.latitudeDelta * factor, 0.0015), 120),
+            longitudeDelta: min(max(current.span.longitudeDelta * factor, 0.0015), 180))
+        camera = .region(MKCoordinateRegion(center: current.center, span: span))
     }
 
     /// 地名 → 坐标（正向地理编码）。拿不到就提示一下，不影响手动填

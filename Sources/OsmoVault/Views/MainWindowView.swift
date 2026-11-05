@@ -12,6 +12,11 @@ struct MainWindowView: View {
     @State private var sourceToRemove: String?
     /// 手动补定位（单个 / 批量）
     @State private var locationTarget: LocationEditTarget?
+    /// 批量动作落地后 +1，通知图库页退出多选（见 LibraryView.selectionResetToken）
+    @State private var selectionResetToken = 0
+    /// 这次补定位面板是不是从图库多选入口打开的。
+    /// 只勾 1 条时面板走 .single（要回显已有坐标），不能靠 isBatch 判断该不该复位多选
+    @State private var locateFromSelection = false
     /// 全屏播放：盖住整个窗口内容，同时把窗口推进原生全屏
     @State private var isTheater = false
     /// 标记「全屏是这次点进来的」，退出时才由我们负责还原窗口（用户自己按过绿灯就不动）
@@ -183,9 +188,13 @@ struct MainWindowView: View {
                                          latitude: coordinate.latitude,
                                          longitude: coordinate.longitude,
                                          placeName: placeName)
+                    // 补/改定位已写库：从多选发起的动作完成就取消多选，
+                    // 别把选择模式留在页面上；详情页 / 右键单条编辑不动多选状态
+                    if self.locateFromSelection { self.selectionResetToken += 1 }
                 },
                 onClear: {
                     appModel.clearLocation(ids: target.ids)
+                    if self.locateFromSelection { self.selectionResetToken += 1 }
                 }
             )
         }
@@ -289,7 +298,10 @@ struct MainWindowView: View {
                         onToggleFavorite: { appModel.toggleFavorite(id: asset.id ?? 0) },
                         onGrab: grabFrame,
                         onDelete: { deleteAsset(asset.id ?? 0) },
-                        onEditLocation: { locationTarget = .single(asset) },
+                        onEditLocation: {
+                            locateFromSelection = false
+                            locationTarget = .single(asset)
+                        },
                         isTheater: isTheater,
                         onToggleTheater: enterTheater,
                         // LocationEditorSheet 打开时禁用裸字母 S，别抢走经纬度输入框的按键
@@ -367,16 +379,29 @@ struct MainWindowView: View {
                     // 单条走 .single：LocationEditorSheet 能回显已有坐标/地名；
                     // 多条才是 .batch（批量没有"已有坐标"的概念）
                     onAssignLocation: { list in
+                        locateFromSelection = true
                         locationTarget = list.count == 1 ? .single(list[0]) : .batch(list)
                     },
                     // 右键补定位：**所有页面**都可用——有定位选「修改定位」，没有选「补定位」
                     onLocateItem: { id in
                         guard let a = appModel.asset(id: id) else { return }
+                        locateFromSelection = false
                         locationTarget = .single(a)
                     },
-                    // 所有页面都能多选后批量移入回收站
-                    onDeleteSelected: { appModel.moveToTrash(ids: $0.compactMap(\.id)) },
-                    emptyHint: hint)
+                    // 所有页面都能多选后批量移入回收站；动作落地后同样退出多选
+                    onDeleteSelected: {
+                        appModel.moveToTrash(ids: $0.compactMap(\.id))
+                        self.selectionResetToken += 1
+                    },
+                    emptyHint: hint,
+                    selectionResetToken: selectionResetToken,
+                    // 多选右键的批量评分 / 批量收藏：整批一次写库，不逐条刷
+                    onRateSelected: { list, rating in
+                        appModel.setRating(ids: list.compactMap(\.id), rating: rating)
+                    },
+                    onSetFavoriteSelected: { list, favorite in
+                        appModel.setFavorite(ids: list.compactMap(\.id), favorite: favorite)
+                    })
     }
 
     private func placeholder(_ text: String) -> some View {

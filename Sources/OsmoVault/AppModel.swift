@@ -394,6 +394,14 @@ final class AppModel: ObservableObject {
         syncSidecars(ids: [id])
     }
 
+    /// 批量评分（多选右键）：一次内存 patch + 一个事务 + 一次 sidecar 同步
+    func setRating(ids: [Int64], rating: Int) {
+        guard !ids.isEmpty else { return }
+        patch(ids: Set(ids)) { $0.rating = rating }
+        try? database.updateRating(ids: ids, rating: rating)
+        syncSidecars(ids: ids)
+    }
+
     func setColorLabel(id: Int64, label: Int) {
         patch(id: id) { $0.colorLabel = label }
         try? database.updateColorLabel(id: id, label: label)
@@ -406,6 +414,15 @@ final class AppModel: ObservableObject {
         patch(id: id) { $0.isFavorite = next }
         try? database.setFavorite(id: id, favorite: next)
         syncSidecars(ids: [id])
+    }
+
+    /// 批量收藏 / 取消收藏：整批统一设成一个值。
+    /// 勾选集里可能既有已收藏也有未收藏，逐条 toggle 会各自反转，那不是「批量收藏」
+    func setFavorite(ids: [Int64], favorite: Bool) {
+        guard !ids.isEmpty else { return }
+        patch(ids: Set(ids)) { $0.isFavorite = favorite }
+        try? database.setFavorite(ids: ids, favorite: favorite)
+        syncSidecars(ids: ids)
     }
 
     // MARK: - XMP sidecar（人工标注的真源）

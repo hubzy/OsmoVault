@@ -55,12 +55,16 @@ struct SidebarView: View {
                             .help(sourceHelp(item))
                             .tag(SidebarItem.source(item.path))
                             .contextMenu {
-                                Button("在访达中显示") {
+                                Button {
                                     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: item.path)
+                                } label: {
+                                    Label("在访达中显示", systemImage: "folder")
                                 }
                                 Divider()
-                                Button("从库中移除（不删原文件）", role: .destructive) {
+                                Button(role: .destructive) {
                                     onRemoveSource?(item.path)
+                                } label: {
+                                    Label("从库中移除（不删原文件）", systemImage: "folder.badge.minus")
                                 }
                             }
                     }

@@ -82,13 +82,30 @@ struct AssetGridView: View {
                     let batchForChecked = selectionMode && checkedIDs.contains(id) && !checkedAssets.isEmpty
                     let count = checkedAssets.count
 
-                    Button(checkedIDs.contains(id) ? "取消选中" : "多选") { onToggleCheck?(id) }
+                    // 每条都带 SF Symbol：文字和图标同义，扫菜单时不用逐行读。
+                    // 状态变了图标跟着变（选中/取消、收藏/取消、补定位/修改定位）
+                    let isChecked = checkedIDs.contains(id)
+                    Button {
+                        onToggleCheck?(id)
+                    } label: {
+                        Label(isChecked ? "取消选中" : "多选",
+                              systemImage: isChecked ? "xmark.circle" : "checkmark.circle")
+                    }
                     if selectionMode {
                         Divider()
-                        Button(totalCount > 0 && checkedIDs.count >= totalCount ? "取消全选" : "全选") {
+                        let allSelected = totalCount > 0 && checkedIDs.count >= totalCount
+                        Button {
                             onToggleSelectAll?()
+                        } label: {
+                            Label(allSelected ? "取消全选" : "全选",
+                                  systemImage: allSelected ? "checkmark.circle.badge.xmark"
+                                                           : "checkmark.circle.fill")
                         }
-                        Button("退出多选") { onExitSelection?() }
+                        Button {
+                            onExitSelection?()
+                        } label: {
+                            Label("退出多选", systemImage: "xmark.circle")
+                        }
                         Divider()
                     }
                     if onLocate != nil {
@@ -101,14 +118,14 @@ struct AssetGridView: View {
                             } label: {
                                 Label(allLocated ? "修改定位 · 已选 \(count) 条"
                                       : "补定位 · 已选 \(count) 条",
-                                      systemImage: "mappin.circle")
+                                      systemImage: allLocated ? "mappin.and.ellipse" : "mappin.circle")
                             }
                         } else {
                             Button {
                                 onLocate?(id)
                             } label: {
                                 Label(asset.latitude == nil ? "补定位…" : "修改定位…",
-                                      systemImage: "mappin.circle")
+                                      systemImage: asset.latitude == nil ? "mappin.circle" : "mappin.and.ellipse")
                             }
                         }
                     }
@@ -116,34 +133,62 @@ struct AssetGridView: View {
                         // 勾选集里可能有的已收藏有的没收藏：统一设成一个值，
                         // 全已收藏才给「取消收藏」，否则给「收藏」
                         let allFavorite = checkedAssets.allSatisfy { $0.isFavorite }
-                        Button(allFavorite ? "取消收藏 已选 \(count)" : "收藏 已选 \(count)") {
+                        Button {
                             onSetFavoriteChecked(!allFavorite)
+                        } label: {
+                            Label(allFavorite ? "取消收藏 已选 \(count)" : "收藏 已选 \(count)",
+                                  systemImage: allFavorite ? "heart.slash" : "heart")
                         }
                     } else {
-                        Button(asset.isFavorite ? "取消收藏" : "收藏") {
+                        Button {
                             onToggleFavorite?(id)
+                        } label: {
+                            Label(asset.isFavorite ? "取消收藏" : "收藏",
+                                  systemImage: asset.isFavorite ? "heart.slash" : "heart")
                         }
                     }
                     // 评分键盘等价路径：网格里的星标是 onTapGesture，不可聚焦
                     if batchForChecked, let onRateChecked {
-                        Menu("评分 已选 \(count)") {
-                            ForEach(0...5, id: \.self) { r in
-                                Button(r == 0 ? "清除评分" : "\(r) 星") { onRateChecked(r) }
-                            }
+                        Menu {
+                            ratingButtons { onRateChecked($0) }
+                        } label: {
+                            Label("评分 已选 \(count)", systemImage: "star")
                         }
                     } else {
-                        Menu("评分") {
-                            ForEach(0...5, id: \.self) { r in
-                                Button(r == 0 ? "清除评分" : "\(r) 星") { onRate(id, r) }
-                            }
+                        Menu {
+                            ratingButtons { onRate(id, $0) }
+                        } label: {
+                            Label("评分", systemImage: "star")
                         }
                     }
+                    Divider()
                     if batchForChecked, let onDeleteChecked {
-                        Button("移到回收站 已选 \(count)") { onDeleteChecked() }
+                        Button {
+                            onDeleteChecked()
+                        } label: {
+                            Label("移到回收站 已选 \(count)", systemImage: "trash")
+                        }
                     } else {
-                        Button("移到回收站") { onDelete?(id) }
+                        Button {
+                            onDelete?(id)
+                        } label: {
+                            Label("移到回收站", systemImage: "trash")
+                        }
                     }
                 }
+        }
+    }
+
+    /// 评分子菜单的 0~5 星：单条和批量共用，图标也统一（清除用 star.slash）
+    @ViewBuilder
+    private func ratingButtons(_ action: @escaping (Int) -> Void) -> some View {
+        ForEach(0...5, id: \.self) { r in
+            Button {
+                action(r)
+            } label: {
+                Label(r == 0 ? "清除评分" : "\(r) 星",
+                      systemImage: r == 0 ? "star.slash" : "star.fill")
+            }
         }
     }
 
